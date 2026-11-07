@@ -50,29 +50,31 @@ Measured on a Ryzen 9 5900X with ~590 processes:
 Run the benchmark yourself:
 
 ```sh
-taskd --bench 300   # headless sampler benchmark
-taskd --once        # one-shot text summary
+taskdm --bench 300   # headless sampler benchmark
+taskdm --once        # one-shot text summary
 ```
 
 ## Install
 
+The package is called **`taskd-monitor`** and the command is **`taskdm`**. Ubuntu/Debian already ship an unrelated `taskd` package (the Taskwarrior sync server).
+
 From a release, either install the `.deb`:
 
 ```sh
-sudo apt install ./taskd_*_amd64.deb
+sudo apt install ./taskd-monitor_*_amd64.deb
 ```
 
 or use the tarball (installs to `~/.local` by default, no root needed):
 
 ```sh
-tar xzf taskd-*-x86_64-linux.tar.gz && ./taskd-*/install.sh
+tar xzf taskd-monitor-*-x86_64-linux.tar.gz && ./taskd-monitor-*/install.sh
 ```
 
 From source:
 
 ```sh
 cargo build --release
-./target/release/taskd
+./target/release/taskdm
 ```
 
 Taskd runs on X11 and Wayland. It needs no `-dev` packages to build, because the windowing libraries are loaded at runtime.

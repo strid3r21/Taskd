@@ -1,11 +1,15 @@
 [package]
-name = "taskd"
-version = "0.1.1"
+name = "taskd-monitor"
+version = "0.2.0"
 edition = "2024"
 description = "A fast, lightweight task manager for Linux"
 license = "MIT"
 repository = "https://github.com/strid3r21/Taskd"
 rust-version = "1.85"
+
+[[bin]]
+name = "taskdm"
+path = "src/main.rs"
 
 [dependencies]
 # glow (OpenGL) backend only: no wgpu, no persistence/serde, no accesskit.

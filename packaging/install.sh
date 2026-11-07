@@ -4,8 +4,8 @@
 set -eu
 PREFIX="${1:-$HOME/.local}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-install -Dm755 "$HERE/taskd" "$PREFIX/bin/taskd"
-install -Dm644 "$HERE/taskd.desktop" "$PREFIX/share/applications/taskd.desktop"
-install -Dm644 "$HERE/taskd.svg" "$PREFIX/share/icons/hicolor/scalable/apps/taskd.svg"
+install -Dm755 "$HERE/taskdm" "$PREFIX/bin/taskdm"
+install -Dm644 "$HERE/taskd-monitor.desktop" "$PREFIX/share/applications/taskd-monitor.desktop"
+install -Dm644 "$HERE/taskd-monitor.svg" "$PREFIX/share/icons/hicolor/scalable/apps/taskd-monitor.svg"
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$PREFIX/share/applications" || true
-echo "Installed taskd to $PREFIX/bin/taskd"
+echo "Installed Taskd: run it from your menu or with $PREFIX/bin/taskdm"

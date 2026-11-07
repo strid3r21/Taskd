@@ -125,7 +125,7 @@ pub fn run() -> eframe::Result {
     let cfg = Config::load();
     let viewport = egui::ViewportBuilder::default()
         .with_title("Taskd")
-        .with_app_id("taskd")
+        .with_app_id("taskd-monitor")
         .with_inner_size([1040.0, 700.0])
         .with_min_inner_size([620.0, 400.0])
         .with_icon(Arc::new(icon()));

@@ -19,7 +19,7 @@ const HELP: &str = "\
 Taskd - a fast, lightweight task manager for Linux
 
 USAGE:
-    taskd [OPTIONS]
+    taskdm [OPTIONS]
 
 OPTIONS:
     --bench [N]   Run the sampler N times (default 200) headless and print timings
@@ -32,7 +32,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("-h" | "--help") => print!("{HELP}"),
-        Some("-V" | "--version") => println!("taskd {}", env!("CARGO_PKG_VERSION")),
+        Some("-V" | "--version") => println!("taskdm {}", env!("CARGO_PKG_VERSION")),
         Some("--bench") => bench(args.get(1).and_then(|n| n.parse().ok()).unwrap_or(200)),
         Some("--once") => once(),
         Some(other) => {
@@ -41,7 +41,7 @@ fn main() {
         }
         None => {
             if let Err(e) = app::run() {
-                eprintln!("taskd: {e}");
+                eprintln!("taskdm: {e}");
                 std::process::exit(1);
             }
         }
@@ -62,7 +62,7 @@ fn bench(n: usize) {
     costs.sort();
     let avg = costs.iter().sum::<Duration>() / n.max(1) as u32;
     let pct = |p: f64| costs[((costs.len() as f64 - 1.0) * p) as usize];
-    println!("taskd sampler benchmark ({n} samples, {procs} processes)");
+    println!("Taskd sampler benchmark ({n} samples, {procs} processes)");
     println!("  init  {:>9.3?}", init);
     println!("  avg   {:>9.3?}", avg);
     println!("  p50   {:>9.3?}", pct(0.5));

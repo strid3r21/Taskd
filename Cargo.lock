@@ -2119,8 +2119,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "taskd"
-version = "0.1.1"
+name = "taskd-monitor"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "egui_extras",

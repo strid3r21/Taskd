@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build a .deb. Usage: [TASKD_BIN=path/to/taskd] packaging/build-deb.sh [OUT_DIR]
+# Build a .deb. Usage: [TASKD_BIN=path/to/taskdm] packaging/build-deb.sh [OUT_DIR]
 # Uses dpkg-deb when available, otherwise assembles the archive with ar + tar.
 set -eu
 cd "$(dirname "$0")/.."
@@ -10,15 +10,15 @@ ROOT="$(mktemp -d)"
 chmod 755 "$ROOT"
 trap 'rm -rf "$ROOT"' EXIT
 
-install -Dm755 "${TASKD_BIN:-target/release/taskd}" "$ROOT/usr/bin/taskd"
-install -Dm644 packaging/taskd.desktop "$ROOT/usr/share/applications/taskd.desktop"
-install -Dm644 packaging/taskd.svg "$ROOT/usr/share/icons/hicolor/scalable/apps/taskd.svg"
-install -Dm644 LICENSE "$ROOT/usr/share/doc/taskd/copyright"
+install -Dm755 "${TASKD_BIN:-target/release/taskdm}" "$ROOT/usr/bin/taskdm"
+install -Dm644 packaging/taskd-monitor.desktop "$ROOT/usr/share/applications/taskd-monitor.desktop"
+install -Dm644 packaging/taskd-monitor.svg "$ROOT/usr/share/icons/hicolor/scalable/apps/taskd-monitor.svg"
+install -Dm644 LICENSE "$ROOT/usr/share/doc/taskd-monitor/copyright"
 SIZE="$(du -sk "$ROOT/usr" | cut -f1)"
 
 mkdir -p "$ROOT/DEBIAN"
 cat > "$ROOT/DEBIAN/control" <<CONTROL
-Package: taskd
+Package: taskd-monitor
 Version: $VERSION
 Section: admin
 Priority: optional
@@ -33,7 +33,7 @@ Description: Fast, lightweight task manager for Linux
 CONTROL
 
 mkdir -p "$OUT"
-DEB="$OUT/taskd_${VERSION}_${ARCH}.deb"
+DEB="$OUT/taskd-monitor_${VERSION}_${ARCH}.deb"
 if command -v dpkg-deb >/dev/null 2>&1; then
     dpkg-deb --root-owner-group --build "$ROOT" "$DEB" >/dev/null
 else

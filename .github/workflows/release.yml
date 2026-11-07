@@ -51,26 +51,26 @@ jobs:
       - name: Build (glibc ${{ env.GLIBC_BASELINE }} baseline)
         run: |
           cargo zigbuild --release --locked --target "x86_64-unknown-linux-gnu.$GLIBC_BASELINE"
-          cp target/x86_64-unknown-linux-gnu/release/taskd target/release-taskd
+          cp target/x86_64-unknown-linux-gnu/release/taskdm target/release-taskdm
 
       - name: Check glibc requirement
         run: |
-          need="$(grep -ao 'GLIBC_2\.[0-9.]*' target/release-taskd | sort -Vu | tail -1)"
+          need="$(grep -ao 'GLIBC_2\.[0-9.]*' target/release-taskdm | sort -Vu | tail -1)"
           echo "Binary requires $need (baseline GLIBC_$GLIBC_BASELINE)"
           [ "$(printf '%s\n%s\n' "$need" "GLIBC_$GLIBC_BASELINE" | sort -V | tail -1)" = "GLIBC_$GLIBC_BASELINE" ] \
             || { echo "::error::binary needs $need, newer than GLIBC_$GLIBC_BASELINE"; exit 1; }
-          ./target/release-taskd --version
-          ./target/release-taskd --bench 50 | head -3
+          ./target/release-taskdm --version
+          ./target/release-taskdm --bench 50 | head -3
 
       - name: Package
         run: |
           v="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          name="taskd-$v-x86_64-linux"
+          name="taskd-monitor-$v-x86_64-linux"
           mkdir -p "dist/$name"
-          cp target/release-taskd "dist/$name/taskd"
-          cp packaging/taskd.desktop packaging/taskd.svg packaging/install.sh README.md LICENSE "dist/$name/"
+          cp target/release-taskdm "dist/$name/taskdm"
+          cp packaging/taskd-monitor.desktop packaging/taskd-monitor.svg packaging/install.sh README.md LICENSE "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
-          TASKD_BIN=target/release-taskd packaging/build-deb.sh dist
+          TASKD_BIN=target/release-taskdm packaging/build-deb.sh dist
           (cd dist && sha256sum ./*.tar.gz ./*.deb > SHA256SUMS)
           ls -la dist
 

@@ -273,7 +273,7 @@ impl AppsState {
 }
 
 /// Signal a set of processes; anything denied is offered for a retry through pkexec.
-fn signal_many(c: &mut Ctx, what: &str, pids: &[u32], sig: Signal) {
+pub fn signal_many(c: &mut Ctx, what: &str, pids: &[u32], sig: Signal) {
     let mut denied = Vec::new();
     let mut other = None;
     for &pid in pids {

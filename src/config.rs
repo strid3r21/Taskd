@@ -15,6 +15,9 @@ pub struct Config {
     pub cpu_per_core_graphs: bool,
     pub hidden_cols: String,
     pub auto_update: bool,
+    /// Performance sidebar width and device order (comma-separated device keys).
+    pub perf_sidebar: f32,
+    pub perf_order: String,
 }
 
 impl Default for Config {
@@ -31,6 +34,8 @@ impl Default for Config {
             cpu_per_core_graphs: false,
             hidden_cols: String::new(),
             auto_update: true,
+            perf_sidebar: 230.0,
+            perf_order: String::new(),
         }
     }
 }
@@ -62,6 +67,8 @@ impl Config {
                 "cpu_per_core_graphs" => c.cpu_per_core_graphs = b,
                 "hidden_cols" => c.hidden_cols = v.into(),
                 "auto_update" => c.auto_update = b,
+                "perf_sidebar" => c.perf_sidebar = v.parse().unwrap_or(230.0f32).clamp(170.0, 420.0),
+                "perf_order" => c.perf_order = v.into(),
                 _ => {}
             }
         }
@@ -75,7 +82,7 @@ impl Config {
         }
         let text = format!(
             "interval_ms={}\ntab={}\nsort_col={}\nsort_desc={}\ntree={}\nshow_kernel={}\nonly_mine={}\n\
-             per_core_percent={}\ncpu_per_core_graphs={}\nhidden_cols={}\nauto_update={}\n",
+             per_core_percent={}\ncpu_per_core_graphs={}\nhidden_cols={}\nauto_update={}\nperf_sidebar={}\nperf_order={}\n",
             self.interval_ms,
             self.tab,
             self.sort_col,
@@ -86,7 +93,9 @@ impl Config {
             self.per_core_percent,
             self.cpu_per_core_graphs,
             self.hidden_cols,
-            self.auto_update
+            self.auto_update,
+            self.perf_sidebar,
+            self.perf_order
         );
         let _ = std::fs::write(p, text);
     }

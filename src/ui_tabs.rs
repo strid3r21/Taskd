@@ -58,7 +58,7 @@ impl UsersState {
                 if ui.add_enabled(self.selected.is_some(), egui::Button::new("Show processes")).clicked()
                     && let Some(u) = &self.selected
                 {
-                    procs.select_and_filter_user(u);
+                    procs.show_user(u);
                     *c.switch_to = Some(Tab::Processes);
                 }
             });
@@ -108,7 +108,7 @@ impl UsersState {
             self.selected = clicked;
         }
         if let Some(u) = open {
-            procs.select_and_filter_user(&u);
+            procs.show_user(&u);
             *c.switch_to = Some(Tab::Processes);
         }
     }

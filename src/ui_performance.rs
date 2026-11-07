@@ -2,10 +2,15 @@
 
 use eframe::egui::{self, Color32, RichText, Sense, Vec2};
 
-use crate::app::Ctx;
+use std::collections::HashSet;
+
+use crate::actions::Signal;
+use crate::app::{Ctx, Tab};
 use crate::graph::{self, CPU, DISK, GPU, MEM, NET, Series, graph};
 use crate::groups::Group;
 use crate::sampler::{History, Snapshot};
+use crate::ui_apps::signal_many;
+use crate::ui_processes::ProcState;
 use crate::util::{fmt_bits, fmt_bytes, fmt_duration, fmt_rate};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -21,6 +26,8 @@ enum Device {
 #[derive(Default)]
 pub struct PerfState {
     sel: Device,
+    /// Key of the sidebar item being dragged to a new position.
+    drag: Option<String>,
 }
 
 /// Round a throughput ceiling up to a "nice" value so graphs don't jitter.
@@ -39,8 +46,39 @@ fn pct(a: u64, b: u64) -> f32 {
     if b == 0 { 0.0 } else { 100.0 * a as f32 / b as f32 }
 }
 
+/// Stable key for a device, used to remember the sidebar order across restarts.
+fn device_key(d: Device, s: &Snapshot) -> String {
+    match d {
+        Device::Cpu => "cpu".into(),
+        Device::Mem => "mem".into(),
+        Device::Disk(i) => format!("disk:{}", s.disks[i].name),
+        Device::Net(i) => format!("net:{}", s.nets[i].name),
+        Device::Gpu(i) => format!("gpu:{i}"),
+    }
+}
+
+/// All devices in the user's order; ones not in the saved order keep their default place at the end.
+fn ordered_devices(s: &Snapshot, order: &str) -> Vec<(Device, String)> {
+    let mut v: Vec<Device> = vec![Device::Cpu, Device::Mem];
+    v.extend((0..s.disks.len()).map(Device::Disk));
+    v.extend((0..s.nets.len()).map(Device::Net));
+    v.extend((0..s.gpus.len()).map(Device::Gpu));
+    let pos: Vec<&str> = order.split(',').filter(|k| !k.is_empty()).collect();
+    let mut keyed: Vec<(Device, String)> = v.into_iter().map(|d| (d, device_key(d, s))).collect();
+    keyed.sort_by_key(|(_, k)| pos.iter().position(|p| p == k).unwrap_or(usize::MAX));
+    keyed
+}
+
+/// Move `keys[from]` so it lands before the item that was at `target` (or last if `target == len`).
+fn move_item(mut keys: Vec<String>, from: usize, target: usize) -> Vec<String> {
+    let item = keys.remove(from);
+    let to = if target > from { target - 1 } else { target };
+    keys.insert(to.min(keys.len()), item);
+    keys
+}
+
 impl PerfState {
-    pub fn ui(&mut self, ui: &mut egui::Ui, c: &mut Ctx) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, c: &mut Ctx, procs: &mut ProcState) {
         let s = c.snap.clone();
         // Clamp selection if a device disappeared.
         self.sel = match self.sel {
@@ -49,11 +87,25 @@ impl PerfState {
             Device::Gpu(i) if i >= s.gpus.len() => Device::Cpu,
             d => d,
         };
-        egui::Panel::left("perf_list").resizable(false).exact_size(230.0).show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| self.sidebar(ui, &s));
-        });
+        let panel = egui::Panel::left("perf_list")
+            .resizable(true)
+            .default_size(c.cfg.perf_sidebar)
+            .size_range(170.0..=420.0)
+            .show(ui, |ui| {
+                // Don't shrink to the content, or the panel collapses to it and ignores its size.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.sidebar(ui, &s, &mut c.cfg.perf_order));
+            });
+        // Remember the width once the user lets go (not on every frame of the drag).
+        let w = panel.response.rect.width().round();
+        if !ui.input(|i| i.pointer.any_down()) && (w - c.cfg.perf_sidebar).abs() >= 1.0 {
+            c.cfg.perf_sidebar = w;
+        }
+
         let window = window_label(c.cfg.interval_ms);
         let groups = c.groups;
+        let mut act = None;
         egui::CentralPanel::default_margins().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 match self.sel {
@@ -63,11 +115,11 @@ impl PerfState {
                     Device::Net(i) => net_view(ui, &s, i, &window),
                     Device::Gpu(i) => gpu_view(ui, &s, i, &window),
                 }
-                match self.sel {
-                    Device::Cpu => top_list(ui, groups, Metric::Cpu, CPU),
-                    Device::Mem => top_list(ui, groups, Metric::Mem, MEM),
-                    Device::Disk(_) => top_list(ui, groups, Metric::Disk, DISK),
-                    Device::Gpu(_) => top_list(ui, groups, Metric::Gpu, GPU),
+                act = match self.sel {
+                    Device::Cpu => top_list(ui, groups, &s, Metric::Cpu, CPU),
+                    Device::Mem => top_list(ui, groups, &s, Metric::Mem, MEM),
+                    Device::Disk(_) => top_list(ui, groups, &s, Metric::Disk, DISK),
+                    Device::Gpu(_) => top_list(ui, groups, &s, Metric::Gpu, GPU),
                     Device::Net(_) => {
                         ui.add_space(14.0);
                         ui.label(
@@ -77,87 +129,122 @@ impl PerfState {
                             )
                             .weak(),
                         );
+                        None
                     }
-                }
+                };
             });
         });
+        match act {
+            Some(TopAction::Show(name, pids)) => {
+                procs.show_group(name, pids);
+                *c.switch_to = Some(Tab::Processes);
+            }
+            Some(TopAction::Signal(name, pids, sig)) => signal_many(c, &name, &pids, sig),
+            None => {}
+        }
     }
 
-    fn sidebar(&mut self, ui: &mut egui::Ui, s: &Snapshot) {
-        let mut item =
-            |ui: &mut egui::Ui, dev: Device, title: &str, sub: String, h: &History, max: f32, col: Color32| {
-                let selected = self.sel == dev;
-                let frame = egui::Frame::new().inner_margin(6.0).corner_radius(4.0).fill(if selected {
-                    col.gamma_multiply(0.15)
-                } else {
-                    Color32::TRANSPARENT
-                });
-                let r = frame
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            graph(ui, Vec2::new(64.0, 40.0), &[Series::new(h, col)], max, false);
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new(title).strong());
-                                ui.label(RichText::new(sub).small());
-                            });
-                        });
-                    })
-                    .response
-                    .interact(Sense::click());
-                if r.clicked() {
-                    self.sel = dev;
-                }
-            };
-        let cpu = &s.cpu;
-        let mut sub = format!("{:.0}%", cpu.usage);
-        if let Some(f) = cpu.freq_mhz {
-            sub += &format!("  {:.2} GHz", f / 1000.0);
-        }
-        if let Some(t) = cpu.temp_c {
-            sub += &format!("  {t:.0}°C");
-        }
-        item(ui, Device::Cpu, "CPU", sub, &cpu.hist, 100.0, CPU);
-        let m = &s.mem;
-        item(
-            ui,
-            Device::Mem,
-            "Memory",
-            format!("{}/{} ({:.0}%)", fmt_bytes(m.used), fmt_bytes(m.total), pct(m.used, m.total)),
-            &m.hist,
-            100.0,
-            MEM,
-        );
-        for (i, d) in s.disks.iter().enumerate() {
-            item(
-                ui,
-                Device::Disk(i),
-                &format!("Disk {i} ({})", d.name),
-                format!("{}  {:.0}%", if d.rotational { "HDD" } else { "SSD" }, d.busy),
-                &d.busy_hist,
-                100.0,
-                DISK,
-            );
-        }
-        for (i, n) in s.nets.iter().enumerate() {
-            let max = nice_max(n.rx_hist.max().max(n.tx_hist.max()));
-            item(
-                ui,
-                Device::Net(i),
-                &n.name,
-                format!("R {}  S {}", fmt_bits(n.rx_rate), fmt_bits(n.tx_rate)),
-                &n.rx_hist,
-                max,
-                NET,
-            );
-        }
-        for (i, g) in s.gpus.iter().enumerate() {
-            let mut sub = g.util.map_or("—".into(), |u| format!("{u:.0}%"));
-            if let Some(t) = g.temp_c {
-                sub += &format!("  {t:.0}°C");
+    fn sidebar(&mut self, ui: &mut egui::Ui, s: &Snapshot, order: &mut String) {
+        let devices = ordered_devices(s, order);
+        let mut rects = Vec::with_capacity(devices.len());
+        let mut reset = false;
+        for (dev, key) in &devices {
+            let r = self.item(ui, *dev, s);
+            rects.push(r.rect);
+            if r.clicked() {
+                self.sel = *dev;
             }
-            item(ui, Device::Gpu(i), &format!("GPU {i}"), sub, &g.hist, 100.0, GPU);
+            if r.drag_started() {
+                self.drag = Some(key.clone());
+            }
+            r.on_hover_text("Drag to reorder").context_menu(|ui| {
+                if ui.button("Reset order").clicked() {
+                    reset = true;
+                    ui.close();
+                }
+            });
         }
+        if reset {
+            order.clear();
+        }
+
+        // Drag-to-reorder: draw where the item would land, move it on release.
+        let Some(dragged) = self.drag.clone() else { return };
+        let Some(from) = devices.iter().position(|(_, k)| *k == dragged) else {
+            self.drag = None;
+            return;
+        };
+        let y = ui.input(|i| i.pointer.interact_pos()).map_or(0.0, |p| p.y);
+        let target = rects.iter().filter(|r| r.center().y < y).count();
+        let line_y =
+            if target < rects.len() { rects[target].top() - 1.0 } else { rects[rects.len() - 1].bottom() + 1.0 };
+        let x = rects[0].x_range();
+        ui.painter().hline(x, line_y, egui::Stroke::new(2.0, ui.visuals().selection.stroke.color));
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        if ui.input(|i| i.pointer.any_released()) {
+            let keys: Vec<String> = devices.into_iter().map(|(_, k)| k).collect();
+            *order = move_item(keys, from, target).join(",");
+            self.drag = None;
+        }
+    }
+
+    /// One sidebar entry: sparkline + name + current value. Clickable and draggable.
+    fn item(&self, ui: &mut egui::Ui, dev: Device, s: &Snapshot) -> egui::Response {
+        let (title, sub, hist, max, col): (String, String, &History, f32, Color32) = match dev {
+            Device::Cpu => {
+                let cpu = &s.cpu;
+                let mut sub = format!("{:.0}%", cpu.usage);
+                if let Some(f) = cpu.freq_mhz {
+                    sub += &format!("  {:.2} GHz", f / 1000.0);
+                }
+                if let Some(t) = cpu.temp_c {
+                    sub += &format!("  {t:.0}°C");
+                }
+                ("CPU".into(), sub, &cpu.hist, 100.0, CPU)
+            }
+            Device::Mem => {
+                let m = &s.mem;
+                let sub = format!("{}/{} ({:.0}%)", fmt_bytes(m.used), fmt_bytes(m.total), pct(m.used, m.total));
+                ("Memory".into(), sub, &m.hist, 100.0, MEM)
+            }
+            Device::Disk(i) => {
+                let d = &s.disks[i];
+                let sub = format!("{}  {:.0}%", if d.rotational { "HDD" } else { "SSD" }, d.busy);
+                (format!("Disk {i} ({})", d.name), sub, &d.busy_hist, 100.0, DISK)
+            }
+            Device::Net(i) => {
+                let n = &s.nets[i];
+                let max = nice_max(n.rx_hist.max().max(n.tx_hist.max()));
+                (n.name.clone(), format!("R {}  S {}", fmt_bits(n.rx_rate), fmt_bits(n.tx_rate)), &n.rx_hist, max, NET)
+            }
+            Device::Gpu(i) => {
+                let g = &s.gpus[i];
+                let mut sub = g.util.map_or("—".into(), |u| format!("{u:.0}%"));
+                if let Some(t) = g.temp_c {
+                    sub += &format!("  {t:.0}°C");
+                }
+                (format!("GPU {i}"), sub, &g.hist, 100.0, GPU)
+            }
+        };
+        let selected = self.sel == dev;
+        let frame = egui::Frame::new().inner_margin(6.0).corner_radius(4.0).fill(if selected {
+            col.gamma_multiply(0.15)
+        } else {
+            Color32::TRANSPARENT
+        });
+        let r = frame
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    graph(ui, Vec2::new(64.0, 40.0), &[Series::new(hist, col)], max, false);
+                    ui.vertical(|ui| {
+                        ui.add(egui::Label::new(RichText::new(title).strong()).truncate());
+                        ui.add(egui::Label::new(RichText::new(sub).small()).truncate());
+                    });
+                });
+            })
+            .response;
+        r.interact(Sense::click_and_drag())
     }
 }
 
@@ -384,7 +471,13 @@ enum Metric {
 }
 
 /// "Top 10 apps & services" by one resource, below the device graphs.
-fn top_list(ui: &mut egui::Ui, groups: &[Group], m: Metric, color: Color32) {
+/// What the user asked for on a "top" row.
+pub enum TopAction {
+    Show(String, HashSet<u32>),
+    Signal(String, Vec<u32>, Signal),
+}
+
+fn top_list(ui: &mut egui::Ui, groups: &[Group], snap: &Snapshot, m: Metric, color: Color32) -> Option<TopAction> {
     let val = |g: &Group| -> f64 {
         match m {
             Metric::Cpu => g.cpu as f64,
@@ -412,35 +505,83 @@ fn top_list(ui: &mut egui::Ui, groups: &[Group], m: Metric, color: Color32) {
     top.truncate(10);
 
     ui.add_space(16.0);
-    ui.label(RichText::new(title).strong().size(15.0));
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).strong().size(15.0));
+        ui.label(RichText::new("double-click to show in Processes · right-click for actions").small().weak());
+    });
     ui.add_space(4.0);
     if top.is_empty() {
         ui.label(RichText::new("Nothing is using this right now.").weak());
-        return;
+        return None;
     }
     let max = val(top[0]).max(f64::MIN_POSITIVE);
-    let bar_w = (ui.available_width() - 420.0).clamp(80.0, 320.0);
-    egui::Grid::new(("top", title)).num_columns(4).spacing([12.0, 5.0]).striped(true).show(ui, |ui| {
-        for (i, g) in top.iter().enumerate() {
-            ui.label(RichText::new(format!("{}", i + 1)).weak());
-            ui.horizontal(|ui| {
-                ui.set_min_width(240.0);
-                let r = ui.add(egui::Label::new(RichText::new(&g.name).strong()).truncate());
-                r.on_hover_text(format!("{} · {} process(es)", g.kind.label(), g.members.len()));
-                ui.label(RichText::new(g.kind.label()).small().weak());
-            });
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(bar_w, 10.0), Sense::hover());
-            let p = ui.painter();
-            p.rect_filled(rect, 2.0, color.gamma_multiply(0.12));
-            let w = rect.width() * (val(g) / max).clamp(0.0, 1.0) as f32;
-            p.rect_filled(egui::Rect::from_min_size(rect.min, Vec2::new(w, rect.height())), 2.0, color);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.set_min_width(80.0);
-                ui.label(fmt(val(g)));
-            });
-            ui.end_row();
+    let pids = |g: &Group| -> Vec<u32> { g.members.iter().map(|&i| snap.procs[i as usize].pid).collect() };
+    let mut act = None;
+    let (strong, weak) = (ui.visuals().strong_text_color(), ui.visuals().weak_text_color());
+    let stripe = ui.visuals().faint_bg_color;
+    let hover = ui.visuals().widgets.hovered.weak_bg_fill;
+    for (i, g) in top.iter().enumerate() {
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::click());
+        if !ui.is_rect_visible(rect) {
+            continue;
         }
-    });
+        let p = ui.painter();
+        if resp.hovered() {
+            p.rect_filled(rect, 3.0, hover);
+        } else if i % 2 == 1 {
+            p.rect_filled(rect, 0.0, stripe);
+        }
+        let cy = rect.center().y;
+        let font = egui::FontId::proportional(14.0);
+        p.text(egui::pos2(rect.left() + 4.0, cy), egui::Align2::LEFT_CENTER, format!("{}", i + 1), font.clone(), weak);
+        // Name (clipped to its column) + kind tag.
+        let name_w = (rect.width() * 0.38).clamp(160.0, 340.0);
+        let name_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + 30.0, rect.top()),
+            egui::pos2(rect.left() + 30.0 + name_w, rect.bottom()),
+        );
+        let clipped = p.with_clip_rect(name_rect);
+        let r =
+            clipped.text(egui::pos2(name_rect.left(), cy), egui::Align2::LEFT_CENTER, &g.name, font.clone(), strong);
+        clipped.text(
+            egui::pos2(r.right() + 6.0, cy + 1.0),
+            egui::Align2::LEFT_CENTER,
+            g.kind.label(),
+            egui::FontId::proportional(10.5),
+            weak,
+        );
+        // Bar + value.
+        let value_w = 90.0;
+        let bar_left = name_rect.right() + 10.0;
+        let bar_right = (rect.right() - value_w - 10.0).max(bar_left + 40.0);
+        let bar = egui::Rect::from_min_max(egui::pos2(bar_left, cy - 5.0), egui::pos2(bar_right, cy + 5.0));
+        p.rect_filled(bar, 2.0, color.gamma_multiply(0.12));
+        let w = bar.width() * (val(g) / max).clamp(0.0, 1.0) as f32;
+        p.rect_filled(egui::Rect::from_min_size(bar.min, Vec2::new(w, bar.height())), 2.0, color);
+        p.text(egui::pos2(rect.right() - 4.0, cy), egui::Align2::RIGHT_CENTER, fmt(val(g)), font, strong);
+
+        let resp = resp.on_hover_text(format!("{} · {} process(es)", g.kind.label(), g.members.len()));
+        if resp.double_clicked() {
+            act = Some(TopAction::Show(g.name.clone(), pids(g).into_iter().collect()));
+        }
+        resp.context_menu(|ui| {
+            ui.label(RichText::new(&g.name).strong());
+            ui.label(RichText::new(format!("{} · {} process(es)", g.kind.label(), g.members.len())).small().weak());
+            ui.separator();
+            if ui.button("Show in Processes").clicked() {
+                act = Some(TopAction::Show(g.name.clone(), pids(g).into_iter().collect()));
+                ui.close();
+            }
+            if ui.button("End task").clicked() {
+                act = Some(TopAction::Signal(g.name.clone(), pids(g), Signal::Term));
+                ui.close();
+            }
+            if ui.button("Kill").clicked() {
+                act = Some(TopAction::Signal(g.name.clone(), pids(g), Signal::Kill));
+                ui.close();
+            }
+        });
+    }
     if matches!(m, Metric::Disk) {
         ui.label(
             RichText::new(
@@ -449,5 +590,39 @@ fn top_list(ui: &mut egui::Ui, groups: &[Group], m: Metric, color: Color32) {
             .small()
             .weak(),
         );
+    }
+    act
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sampler::{DiskInfo, NetInfo};
+
+    fn keys(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn reorder() {
+        let k = keys(&["cpu", "mem", "disk:a", "gpu:0"]);
+        assert_eq!(move_item(k.clone(), 3, 0), keys(&["gpu:0", "cpu", "mem", "disk:a"]));
+        assert_eq!(move_item(k.clone(), 0, 4), keys(&["mem", "disk:a", "gpu:0", "cpu"]));
+        assert_eq!(move_item(k.clone(), 1, 3), keys(&["cpu", "disk:a", "mem", "gpu:0"]));
+        assert_eq!(move_item(k.clone(), 2, 2), k);
+        assert_eq!(move_item(k.clone(), 2, 3), k);
+    }
+
+    #[test]
+    fn saved_order() {
+        let mut disk = DiskInfo::default();
+        disk.name = "nvme0n1".into();
+        let mut net = NetInfo::default();
+        net.name = "enp6s0".into();
+        let s = Snapshot { disks: vec![disk], nets: vec![net], ..Default::default() };
+        let order = |o: &str| ordered_devices(&s, o).into_iter().map(|(_, k)| k).collect::<Vec<_>>();
+        assert_eq!(order(""), keys(&["cpu", "mem", "disk:nvme0n1", "net:enp6s0"]));
+        // Saved keys first in saved order; unknown/stale keys ignored; unsaved devices keep default order after.
+        assert_eq!(order("net:enp6s0,gone:x,cpu"), keys(&["net:enp6s0", "cpu", "mem", "disk:nvme0n1"]));
     }
 }

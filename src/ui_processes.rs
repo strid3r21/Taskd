@@ -150,6 +150,16 @@ struct OrderKey {
     kernel: bool,
     mine: bool,
     collapsed: usize,
+    scope: u64,
+}
+
+/// A filter applied from another tab ("Show in Processes", double-click a user).
+/// It overrides "Only mine" / "Kernel threads" so the picked processes are always visible.
+enum Scope {
+    /// An app or service: the processes it had when picked.
+    Group(String, HashSet<u32>),
+    /// Every process of a user, including ones started later.
+    User(String),
 }
 
 #[derive(Default)]
@@ -165,6 +175,9 @@ pub struct ProcState {
     scroll_to_selected: bool,
     pending_sort: Option<Col>,
     clipboard: Option<String>,
+    /// "Show in Processes" from another tab: only these pids, labelled with the app/service name.
+    scope: Option<Scope>,
+    scope_gen: u64,
 }
 
 impl ProcState {
@@ -182,6 +195,7 @@ impl ProcState {
             kernel: c.cfg.show_kernel,
             mine: c.cfg.only_mine,
             collapsed: self.collapsed.len(),
+            scope: self.scope_gen,
         };
         if key == self.key {
             return;
@@ -197,8 +211,12 @@ impl ProcState {
         let visible: Vec<u32> = (0..procs.len() as u32)
             .filter(|&i| {
                 let p = &procs[i as usize];
-                (key.kernel || !p.kernel)
-                    && (!key.mine || p.uid == c.my_uid)
+                let shown = match &self.scope {
+                    Some(Scope::Group(_, pids)) => pids.contains(&p.pid),
+                    Some(Scope::User(u)) => *p.user == **u && (key.kernel || !p.kernel),
+                    None => (key.kernel || !p.kernel) && (!key.mine || p.uid == c.my_uid),
+                };
+                shown
                     && (needle.is_empty()
                         || p.name.to_lowercase().contains(&needle)
                         || p.cmd.to_lowercase().contains(&needle)
@@ -244,8 +262,26 @@ impl ProcState {
         self.key = key;
     }
 
-    pub fn select_and_filter_user(&mut self, user: &str) {
-        self.filter = user.to_string();
+    /// Show every process of `user` (live: new processes appear too).
+    pub fn show_user(&mut self, user: &str) {
+        self.filter.clear();
+        self.scope = Some(Scope::User(user.to_string()));
+        self.scope_gen += 1;
+    }
+
+    /// Show only `pids` (an app or service picked on another tab) and select its first process.
+    pub fn show_group(&mut self, label: String, pids: HashSet<u32>) {
+        self.selected = pids.iter().min().copied();
+        self.scroll_to_selected = true;
+        self.filter.clear();
+        self.scope = Some(Scope::Group(label, pids));
+        self.scope_gen += 1;
+    }
+
+    fn clear_scope(&mut self) {
+        if self.scope.take().is_some() {
+            self.scope_gen += 1;
+        }
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, c: &mut Ctx) {
@@ -330,6 +366,15 @@ impl ProcState {
             }
             if !self.filter.is_empty() && ui.small_button("✖").clicked() {
                 self.filter.clear();
+            }
+            if let Some(scope) = &self.scope {
+                let chip = match scope {
+                    Scope::Group(label, pids) => format!("Showing: {label} ({}) ✖", pids.len()),
+                    Scope::User(u) => format!("Showing: user {u} ✖"),
+                };
+                if ui.button(RichText::new(chip).strong()).on_hover_text("Show all processes again").clicked() {
+                    self.clear_scope();
+                }
             }
             ui.checkbox(&mut c.cfg.tree, "Tree");
             ui.checkbox(&mut c.cfg.only_mine, "Only mine");
@@ -541,7 +586,7 @@ impl ProcState {
                 c.info("Copied to clipboard");
                 self.clipboard = Some(s);
             }
-            Action::FilterUser(u) => self.filter = u,
+            Action::FilterUser(u) => self.show_user(&u),
             Action::Signal(pid, sig) => {
                 let name = snap.procs.iter().find(|p| p.pid == pid).map_or_else(|| "?".into(), |p| p.name.clone());
                 match actions::send_signal(pid, sig) {

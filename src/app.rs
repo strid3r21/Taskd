@@ -138,7 +138,7 @@ pub struct App {
 pub fn run() -> eframe::Result {
     let cfg = Config::load();
     let viewport = egui::ViewportBuilder::default()
-        .with_title("Taskd")
+        .with_title(format!("Taskd {}", env!("CARGO_PKG_VERSION")))
         .with_app_id("taskd-monitor")
         .with_inner_size([1040.0, 700.0])
         .with_min_inner_size([620.0, 400.0])
@@ -313,6 +313,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.add_space(4.0);
             ui.label(RichText::new("Taskd").strong().size(16.0));
+            ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).small().weak());
             ui.add_space(10.0);
             for (i, t) in Tab::ALL.into_iter().enumerate() {
                 let r = ui.selectable_label(self.tab == t, t.label());
@@ -479,7 +480,7 @@ impl eframe::App for App {
             match self.tab {
                 Tab::Apps => self.apps.ui(ui, &mut c),
                 Tab::Processes => self.procs.ui(ui, &mut c),
-                Tab::Performance => self.perf.ui(ui, &mut c),
+                Tab::Performance => self.perf.ui(ui, &mut c, &mut self.procs),
                 Tab::Users => self.users.ui(ui, &mut c, &mut self.procs),
                 Tab::Services => self.services.ui(ui, &mut c),
                 Tab::Startup => self.startup.ui(ui, &mut c),

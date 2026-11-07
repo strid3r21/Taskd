@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build a .deb from target/release/taskd. Usage: packaging/build-deb.sh [OUT_DIR]
+# Build a .deb. Usage: [TASKD_BIN=path/to/taskd] packaging/build-deb.sh [OUT_DIR]
 # Uses dpkg-deb when available, otherwise assembles the archive with ar + tar.
 set -eu
 cd "$(dirname "$0")/.."
@@ -10,7 +10,7 @@ ROOT="$(mktemp -d)"
 chmod 755 "$ROOT"
 trap 'rm -rf "$ROOT"' EXIT
 
-install -Dm755 target/release/taskd "$ROOT/usr/bin/taskd"
+install -Dm755 "${TASKD_BIN:-target/release/taskd}" "$ROOT/usr/bin/taskd"
 install -Dm644 packaging/taskd.desktop "$ROOT/usr/share/applications/taskd.desktop"
 install -Dm644 packaging/taskd.svg "$ROOT/usr/share/icons/hicolor/scalable/apps/taskd.svg"
 install -Dm644 LICENSE "$ROOT/usr/share/doc/taskd/copyright"
@@ -24,7 +24,7 @@ Section: admin
 Priority: optional
 Architecture: $ARCH
 Installed-Size: $SIZE
-Depends: libc6, libgl1
+Depends: libc6 (>= 2.31), libgl1
 Recommends: policykit-1 | pkexec
 Maintainer: strid3r21 <strid3r21@users.noreply.github.com>
 Description: Fast, lightweight task manager for Linux

@@ -1,135 +1,127 @@
 # Taskd
 
-A fast, lightweight task manager for Linux. It's a single ~8 MB native binary with no runtime dependencies beyond libc and OpenGL.
+A fast, lightweight task manager for Linux. It's a single native binary that uses about 1% of one CPU core while open.
 
-## Features
+It shows your apps, processes, performance graphs (CPU, memory, disks, network, GPU), users, systemd services and startup apps. It can also act as an **MCP server**, so a local AI agent can look through your system for performance problems.
 
-- **Apps**: running applications with each one's processes grouped together, and totals for CPU, memory, GPU and disk. Apps are recognized by their systemd app scope (Flatpaks, VS Code, apps launched by GNOME/KDE) or by matching their executable to an installed `.desktop` entry (menu launches on Cinnamon and others). Expand an app to see its processes, or end, kill, suspend or resume the whole app.
-- **Processes**: a sortable, virtualized table. You can filter by name, command, user or PID, show a tree view, hide kernel threads, show only your own processes, and choose which columns appear. Each process shows CPU, memory (private), GPU, RSS, disk read/write rates, threads, nice value, state, how long it has been running, and its command line. Busy CPU and memory cells are tinted.
-- **Process actions**: End (TERM), Kill (KILL), Suspend/Resume (STOP/CONT), HUP and INT, priority (nice), and copying the PID, name or command. If permission is denied, Taskd offers to retry through `pkexec`.
-- **Process details**: the executable, working directory, command line, cgroup, open fds, fd limit, environment size, memory breakdown and context switches.
-- **Performance**: live graphs for CPU (overall or per logical processor, plus frequency, temperature, load, context switches), memory (composition and swap), each disk (active time, read/write throughput), each network interface (receive/send, link speed) and each GPU (NVIDIA via NVML; AMD/Intel via sysfs). It shows utilization, VRAM, temperature and power. Below the graphs is a **top 10 apps & services** list for the selected resource (CPU, memory, GPU, disk).
-- **Per-process GPU usage**: NVML per-process samples on NVIDIA; DRM `fdinfo` engine counters on AMD/Intel.
-- **Users**: CPU, memory and disk usage per user. Double-click a user to filter the Processes tab to them.
-- **Services**: systemd system and user services. You can filter, start, stop, restart, enable and disable them; polkit prompts when needed.
-- **Startup**: XDG autostart entries. Toggling one writes a per-user override and never edits system files.
-- **Auto-update**: at launch Taskd checks GitHub for a newer release (one API request). Tarball installs download it, verify it against `SHA256SUMS`, check that the new binary runs, swap it in atomically, and restart, all automatically. `.deb` installs show an **Update & restart** banner, which asks for your password. Use the ⚙ menu to turn the launch check off or check now, or run `taskdm --update` from a terminal.
-- **Settings**: refresh interval (250 ms to 10 s), pause, and remembered UI state (`~/.config/taskd/config`).
+## Install
 
-- **MCP server for local LLM agents**: `taskdm --mcp` lets an agent inspect the system (see [below](#mcp-server-for-llm-agents)).
-
-### Keyboard
-
-| Key | Action |
-| --- | --- |
-| `Ctrl+1`…`Ctrl+6` | Switch tab |
-| `Ctrl+F` | Focus the process filter |
-| `↑` / `↓` | Move selection |
-| `Enter` | Process details |
-| `Delete` / `Shift+Delete` | End / kill the selected process or app |
-| `Ctrl+P` | Pause or resume updates |
-| `F5` | Refresh now |
-
-## Performance
-
-Taskd is built to cost almost nothing while it runs:
-
-- **It reads `/proc` and `/sys` directly** instead of using a general-purpose system-info crate. Parsing works on byte slices in reused buffers, so there's no per-tick allocation in the hot paths.
-- **It keeps fds open and uses `pread`.** procfs regenerates a file's content on every read at offset 0, so Taskd keeps each process's `stat`/`statm`/`io` fds open and re-reads them with a single `pread`. That replaces `open`+`read`+`close` and skips the costly `/proc/<pid>` path lookup. System files (`/proc/stat`, `meminfo`, cpufreq, hwmon, …) get the same treatment. Std's `read_to_end` was avoided too, because it adds `statx`+`lseek` to every file.
-- **Sampling runs on its own thread.** The UI only reads the latest immutable snapshot (an `Arc` swap), so a slow frame never delays sampling and vice versa.
-- **It repaints only when there's new data or input.** There's no continuous render loop and exactly one frame per sample. egui paints two frames for a zero-delay repaint request, so the sampler requests a 1 ms delay instead.
-- **The process table is virtualized.** Only visible rows are laid out, and the sorted/filtered/tree order is cached per snapshot.
-- **GPU telemetry loads NVML with `dlopen`** at runtime, so there's no link dependency. NVML's per-process query costs 1–3 ms, so it runs at most every ~2 s and its values are reused in between (NVML buffers samples, so nothing is lost). AMD/Intel DRM fds are found by a round-robin scan that only runs when such a GPU is present.
-- **Grouping into apps and services only runs while the Apps or Performance tab is visible**, once per snapshot. Services and startup entries load only when you open their tab.
-
-Measured on a Ryzen 9 5900X with ~590 processes:
-
-| | |
-| --- | --- |
-| Sampler cost per tick | **~3.3 ms** (was 8.8 ms before the pread/fd-cache work) |
-| Whole app, window visible, 1 s interval | **~1% of one core** |
-| Private memory | **~33 MB** (RSS ~95 MB, mostly the GL driver) |
-
-Run the benchmark yourself:
+Download the latest release from the [Releases page](https://github.com/strid3r21/Taskd/releases), then either:
 
 ```sh
-taskdm --bench 300   # headless sampler benchmark
-taskdm --once        # one-shot text summary
+# Debian / Ubuntu / Mint
+sudo apt install ./taskd-monitor_*_amd64.deb
+
+# Any distro (installs to ~/.local, no root needed)
+tar xzf taskd-monitor-*-x86_64-linux.tar.gz && ./taskd-monitor-*/install.sh
 ```
 
-## MCP server for LLM agents
+Then start **Taskd** from your app menu, or run `taskdm`.
 
-`taskdm --mcp` runs Taskd headless as a [Model Context Protocol](https://modelcontextprotocol.io) server on stdio. Any MCP-capable agent (LM Studio, Ollama front-ends, Goose, Open WebUI via mcpo, Claude Desktop, …) can then look through your running tasks for problems. It uses the same sampler as the GUI, so the agent gets current rates, recent history, and processes grouped into apps and services, not one-off `ps` output (whose CPU% is a lifetime average).
+> The package is named `taskd-monitor` and the command is `taskdm`, because Debian and Ubuntu already have an unrelated `taskd` package.
 
-| Tool | What it gives the agent |
+Taskd keeps itself up to date. Tarball installs update automatically at launch. `.deb` installs show an **Update & restart** banner, which asks for your password. You can turn this off in the ⚙ menu.
+
+## What's inside
+
+| Tab | What you can do |
 | --- | --- |
-| `health_check` | Findings with severity and the apps responsible: CPU saturation, single-core bottlenecks, memory pressure, swapping, I/O wait, busy disks, GPU load/heat, temperatures, runaway or memory-hogging processes, zombie/stuck processes, failed services. **Start here.** |
-| `system_overview` | CPU, memory/swap, disks, network, GPUs, load, uptime |
-| `top_consumers` | Top apps/services (or processes) by CPU, memory, GPU or disk I/O |
-| `list_processes` | Filter by text, user or state; sort and limit |
-| `process_details` | Executable, command, parents/children, cgroup, memory breakdown, open files, limits |
-| `resource_history` | Min/avg/max/latest and a downsampled series for the last ~2 minutes |
-| `failed_services`, `service_logs` | Failed systemd units and their recent journal lines |
+| **Apps** | See running apps with their processes grouped together. End, kill, suspend or resume a whole app. |
+| **Processes** | See every process with CPU, memory, GPU, disk, threads and state. Filter, sort, use tree view, change priority, send signals, open details. |
+| **Performance** | Live graphs for CPU (per core too), memory, each disk, network interface and GPU, plus the top 10 apps and services using each one. Drag the sidebar to resize or reorder it. |
+| **Users** | Resource use per user. Double-click a user to see their processes. |
+| **Services** | Start, stop, restart, enable and disable systemd services. |
+| **Startup** | Turn apps that launch at login on or off. |
 
-**It's read-only by default.** The action tools `signal_process` (end/kill/suspend/resume) and `set_priority` only exist when you start it with `--mcp-allow-actions`; otherwise they aren't even offered to the model. Even then, PID 1, kernel threads and Taskd itself are refused, and you can't act on other users' processes without root. Nothing listens on the network. Command lines are included (truncated) and environment variables never are.
+**Keyboard:** `Ctrl+1`–`6` switch tabs · `Ctrl+F` search · `Delete` / `Shift+Delete` end / kill · `Enter` details · `Ctrl+P` pause · `F5` refresh
 
-Client configuration (the usual `mcpServers` format; use the full path, since GUI apps often don't have `~/.local/bin` on their `PATH`):
+## Use it with a local AI agent (MCP)
+
+[MCP](https://modelcontextprotocol.io) (Model Context Protocol) is a standard way for AI apps to use outside tools. Run `taskdm --mcp` and any MCP-capable AI app can ask Taskd about your system: what's using the CPU, why memory is full, which service failed, and so on. It runs on your machine, talks to the app over standard input/output, and opens no network port.
+
+### 1. Find the path to `taskdm`
+
+```sh
+which taskdm
+```
+
+It's usually `/usr/bin/taskdm` (`.deb`) or `/home/YOU/.local/bin/taskdm` (tarball). Use the full path below, because desktop apps often don't search `~/.local/bin`.
+
+### 2. Add Taskd to your AI app
+
+Most MCP apps (LM Studio, Claude Desktop, Goose, Cursor, …) use the same configuration format. Add this to your app's MCP settings, usually a file called `mcp.json` or similar:
 
 ```json
 {
   "mcpServers": {
-    "taskd": { "command": "/home/YOU/.local/bin/taskdm", "args": ["--mcp"] }
+    "taskd": {
+      "command": "/usr/bin/taskdm",
+      "args": ["--mcp"]
+    }
   }
 }
 ```
 
-For a `.deb` install the command is `/usr/bin/taskdm`. Add `"--mcp-allow-actions"` to `args` only if you want the agent to be able to end processes.
+- **LM Studio:** open the **Program** tab in the right sidebar → **Install** → **Edit mcp.json**, paste the block above, and save.
+- **Ollama:** Ollama itself doesn't load MCP servers. Use an MCP-capable front-end with it (for example Open WebUI or an Ollama MCP client) and give it the same command.
 
-## Install
+Pick a model that supports **tool calling**. Most recent Qwen, Llama 3.1+, Mistral and Gemma models do.
 
-The package is called **`taskd-monitor`** and the command is **`taskdm`**. Ubuntu/Debian already ship an unrelated `taskd` package (the Taskwarrior sync server).
+### 3. Ask it things
 
-From a release, either install the `.deb`:
+- "Why is my computer slow right now?"
+- "What's using the most memory?"
+- "Has anything been hogging the CPU over the last couple of minutes?"
+- "Are any services failing? Show me their logs."
+- "What is process 12345 and what started it?"
+
+A good agent starts with `health_check`, then digs into the details.
+
+### What the agent can see
+
+| Tool | Gives the agent |
+| --- | --- |
+| `health_check` | A list of likely problems with severity and the apps responsible: CPU or memory pressure, swapping, slow disks, hot CPU/GPU, runaway processes, stuck processes, failed services |
+| `system_overview` | CPU, memory, disks, network, GPUs, load and uptime |
+| `top_consumers` | Top apps, services or processes by CPU, memory, GPU or disk |
+| `list_processes` | Processes filtered by name, user or state |
+| `process_details` | Everything about one process, including its parents and children |
+| `resource_history` | How a resource has behaved over the last ~2 minutes |
+| `failed_services`, `service_logs` | Failed systemd services and their recent log lines |
+
+### Safety
+
+The server is **read-only by default**. The agent can look but can't change anything.
+
+To let it end processes or change priorities, add `"--mcp-allow-actions"` to `args`. Even then, Taskd refuses to touch the init process, kernel threads or itself, and it can't touch other users' processes unless it runs as root. Process command lines are shared with the agent (shortened); environment variables never are.
+
+### Check that it works
 
 ```sh
-sudo apt install ./taskd-monitor_*_amd64.deb
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+              '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | taskdm --mcp
 ```
 
-or use the tarball (installs to `~/.local` by default, no root needed):
+You should see two JSON replies, the second listing the tools above.
 
-```sh
-tar xzf taskd-monitor-*-x86_64-linux.tar.gz && ./taskd-monitor-*/install.sh
-```
+## Performance
 
-From source:
+Taskd is built to stay out of your way:
+
+- It reads `/proc` and `/sys` directly and keeps files open between updates. Collecting everything for ~590 processes takes about **3 ms**.
+- It redraws only when new data arrives or you interact with it. The process table only draws visible rows.
+- With the window open at a 1 s refresh it uses **~1% of one core** and **~33 MB** of private memory.
+
+Measure it on your own machine with `taskdm --bench`.
+
+## Building from source
 
 ```sh
 cargo build --release
 ./target/release/taskdm
 ```
 
-Taskd runs on X11 and Wayland. It needs no `-dev` packages to build, because the windowing libraries are loaded at runtime.
-
-## Development
-
-```sh
-cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
-```
-
-| Path | What |
-| --- | --- |
-| `src/sampler.rs` | `/proc` + `/sys` sampling, snapshots, sampler thread |
-| `src/gpu.rs` | NVML (dlopen) and amdgpu sysfs |
-| `src/util.rs` | Raw/pread file readers, byte parsers, formatting |
-| `src/groups.rs` | Grouping processes into apps (desktop entries/app scopes) and services |
-| `src/mcp.rs` | MCP server (stdio JSON-RPC): tools, health-check heuristics |
-| `src/updater.rs` | Self-update from GitHub releases |
-| `src/actions.rs` | Signals, renice, pkexec fallback, process details |
-| `src/services.rs`, `src/startup.rs` | systemd and XDG autostart |
-| `src/app.rs` | Window, tabs, status bar, background jobs |
-| `src/ui_*.rs`, `src/graph.rs` | Tabs and the hand-painted graph widget |
-
-CI (`.github/workflows/ci.yml`) runs fmt, clippy, tests, a release build and the sampler benchmark on our self-hosted Unraid runner (`[self-hosted, linux, unraid]`). Pushing a `v*` tag that matches the version in `Cargo.toml` builds the tarball and `.deb` and publishes a GitHub release (`release.yml`).
+It needs no extra `-dev` packages: the windowing and GPU libraries are loaded at runtime. Before sending changes, run `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`.
 
 ## License
 

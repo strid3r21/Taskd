@@ -14,6 +14,7 @@ pub struct Config {
     pub per_core_percent: bool,
     pub cpu_per_core_graphs: bool,
     pub hidden_cols: String,
+    pub auto_update: bool,
 }
 
 impl Default for Config {
@@ -29,6 +30,7 @@ impl Default for Config {
             per_core_percent: false,
             cpu_per_core_graphs: false,
             hidden_cols: String::new(),
+            auto_update: true,
         }
     }
 }
@@ -59,6 +61,7 @@ impl Config {
                 "per_core_percent" => c.per_core_percent = b,
                 "cpu_per_core_graphs" => c.cpu_per_core_graphs = b,
                 "hidden_cols" => c.hidden_cols = v.into(),
+                "auto_update" => c.auto_update = b,
                 _ => {}
             }
         }
@@ -72,7 +75,7 @@ impl Config {
         }
         let text = format!(
             "interval_ms={}\ntab={}\nsort_col={}\nsort_desc={}\ntree={}\nshow_kernel={}\nonly_mine={}\n\
-             per_core_percent={}\ncpu_per_core_graphs={}\nhidden_cols={}\n",
+             per_core_percent={}\ncpu_per_core_graphs={}\nhidden_cols={}\nauto_update={}\n",
             self.interval_ms,
             self.tab,
             self.sort_col,
@@ -82,7 +85,8 @@ impl Config {
             self.only_mine,
             self.per_core_percent,
             self.cpu_per_core_graphs,
-            self.hidden_cols
+            self.hidden_cols,
+            self.auto_update
         );
         let _ = std::fs::write(p, text);
     }

@@ -17,6 +17,7 @@ use crate::ui_apps::AppsState;
 use crate::ui_performance::PerfState;
 use crate::ui_processes::ProcState;
 use crate::ui_tabs::{ServicesState, StartupState, UsersState};
+use crate::updater;
 use crate::util::{fmt_bytes, fmt_duration};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -61,6 +62,18 @@ pub enum JobResult {
     Status(String, bool),
     Services(bool, Result<Vec<Service>, String>),
     Startup(Vec<StartupEntry>),
+    /// Result of an update check; `bool` = started by the user (report "up to date"/errors).
+    UpdateCheck(Result<Option<updater::Release>, String>, bool),
+    UpdateInstalled(Result<std::path::PathBuf, String>),
+}
+
+#[derive(Default)]
+struct UpdateState {
+    kind: Option<updater::InstallKind>,
+    available: Option<updater::Release>,
+    installing: bool,
+    dismissed: bool,
+    last_error: Option<String>,
 }
 
 pub struct Ctx<'a> {
@@ -119,6 +132,7 @@ pub struct App {
     users: UsersState,
     services: ServicesState,
     startup: StartupState,
+    update: UpdateState,
 }
 
 pub fn run() -> eframe::Result {
@@ -152,7 +166,13 @@ impl App {
         });
         let (tx, rx) = channel();
         let snap = shared.latest();
+        let jobs = Jobs { tx, ctx: cc.egui_ctx.clone() };
+        let update = UpdateState { kind: Some(updater::install_kind()), ..Default::default() };
+        if cfg.auto_update {
+            jobs.spawn(|| JobResult::UpdateCheck(updater::check(), false));
+        }
         App {
+            update,
             shared,
             snap,
             tab: Tab::from_key(&cfg.tab),
@@ -165,7 +185,7 @@ impl App {
             services: ServicesState::default(),
             startup: StartupState::default(),
             cfg,
-            jobs: Jobs { tx, ctx: cc.egui_ctx.clone() },
+            jobs,
             rx,
             status: None,
             elevate: None,
@@ -180,8 +200,111 @@ impl App {
                 JobResult::Status(m, err) => self.status = Some((m, err, Instant::now())),
                 JobResult::Services(user, res) => self.services.loaded(user, res),
                 JobResult::Startup(list) => self.startup.loaded(list),
+                JobResult::UpdateCheck(res, manual) => self.update_checked(res, manual),
+                JobResult::UpdateInstalled(Ok(exe)) => {
+                    // Settings are saved on every change, so it's safe to hand over right away.
+                    updater::restart(&exe);
+                }
+                JobResult::UpdateInstalled(Err(e)) => {
+                    self.update.installing = false;
+                    self.status = Some((format!("Update failed: {e}"), true, Instant::now()));
+                    self.update.last_error = Some(e);
+                }
             }
         }
+    }
+
+    fn update_checked(&mut self, res: Result<Option<updater::Release>, String>, manual: bool) {
+        match res {
+            Ok(Some(rel)) => {
+                self.update.last_error = None;
+                self.update.dismissed = false;
+                let silent = matches!(self.update.kind, Some(updater::InstallKind::Portable(_)));
+                self.update.available = Some(rel);
+                // Tarball installs need no password, so install right away when allowed.
+                if silent && self.cfg.auto_update {
+                    self.start_install();
+                }
+            }
+            Ok(None) => {
+                self.update.last_error = None;
+                if manual {
+                    self.status = Some(("Taskd is up to date".into(), false, Instant::now()));
+                }
+            }
+            Err(e) => {
+                if manual {
+                    self.status = Some((format!("Couldn't check for updates: {e}"), true, Instant::now()));
+                }
+                self.update.last_error = Some(e);
+            }
+        }
+    }
+
+    fn start_install(&mut self) {
+        let (Some(rel), Some(kind)) = (self.update.available.clone(), self.update.kind.clone()) else { return };
+        if self.update.installing {
+            return;
+        }
+        self.update.installing = true;
+        self.jobs.spawn(move || JobResult::UpdateInstalled(updater::install(&rel, &kind)));
+    }
+
+    fn settings_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("⚙", |ui| {
+            let kind = self.update.kind.clone().unwrap_or(updater::InstallKind::Unmanaged);
+            ui.label(RichText::new(format!("Taskd {}", updater::current_version())).strong());
+            ui.label(RichText::new(updater::describe(&kind)).small().weak());
+            ui.separator();
+            ui.checkbox(&mut self.cfg.auto_update, "Check for updates at launch").on_hover_text(match kind {
+                updater::InstallKind::Portable(_) => "Updates are downloaded, verified and installed automatically.",
+                updater::InstallKind::Deb => "You'll be asked for your password to install an update.",
+                updater::InstallKind::Unmanaged => "This build can't update itself; you'll only be notified.",
+            });
+            if ui.add_enabled(!self.update.installing, egui::Button::new("Check for updates now")).clicked() {
+                self.jobs.spawn(|| JobResult::UpdateCheck(updater::check(), true));
+                ui.close();
+            }
+            if let Some(e) = &self.update.last_error {
+                ui.label(RichText::new(format!("Last update error: {e}")).small().color(ui.visuals().error_fg_color));
+            }
+        });
+    }
+
+    fn update_banner(&mut self, ui: &mut egui::Ui) {
+        let Some(rel) = self.update.available.clone() else { return };
+        if self.update.dismissed {
+            return;
+        }
+        let kind = self.update.kind.clone().unwrap_or(updater::InstallKind::Unmanaged);
+        egui::Frame::new()
+            .fill(ui.visuals().selection.bg_fill.gamma_multiply(0.35))
+            .inner_margin(egui::Margin::symmetric(8, 5))
+            .corner_radius(4.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if self.update.installing {
+                        ui.spinner();
+                        ui.label(format!("Updating to Taskd {}…", rel.version));
+                        return;
+                    }
+                    ui.label(RichText::new(format!("Taskd {} is available", rel.version)).strong());
+                    if kind != updater::InstallKind::Unmanaged {
+                        let hint = if kind == updater::InstallKind::Deb { "Asks for your password" } else { "" };
+                        if ui.button("Update & restart").on_hover_text(hint).clicked() {
+                            self.start_install();
+                        }
+                    }
+                    if !rel.url.is_empty() && ui.button("What's new").clicked() {
+                        let _ = std::process::Command::new("xdg-open").arg(&rel.url).spawn();
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.small_button("✖").on_hover_text("Dismiss").clicked() {
+                            self.update.dismissed = true;
+                        }
+                    });
+                });
+            });
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
@@ -196,6 +319,7 @@ impl App {
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                self.settings_menu(ui);
                 let paused = self.shared.paused.load(Ordering::Relaxed);
                 let label = if paused { "▶ Resume" } else { "⏸ Pause" };
                 if ui.button(label).on_hover_text("Pause/resume updates (Ctrl+P)").clicked() {
@@ -330,6 +454,7 @@ impl eframe::App for App {
             ui.add_space(3.0);
             self.top_bar(ui);
             ui.add_space(1.0);
+            self.update_banner(ui);
         });
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
 

@@ -11,6 +11,7 @@ mod ui_apps;
 mod ui_performance;
 mod ui_processes;
 mod ui_tabs;
+mod updater;
 mod util;
 
 use std::time::{Duration, Instant};
@@ -24,6 +25,7 @@ USAGE:
 OPTIONS:
     --bench [N]   Run the sampler N times (default 200) headless and print timings
     --once        Print one sample summary and exit
+    --update      Check for a new release and install it
     -V, --version Print version
     -h, --help    Print this help
 ";
@@ -35,6 +37,7 @@ fn main() {
         Some("-V" | "--version") => println!("taskdm {}", env!("CARGO_PKG_VERSION")),
         Some("--bench") => bench(args.get(1).and_then(|n| n.parse().ok()).unwrap_or(200)),
         Some("--once") => once(),
+        Some("--update") => std::process::exit(updater::cli()),
         Some(other) => {
             eprintln!("unknown option: {other}\n\n{HELP}");
             std::process::exit(2);

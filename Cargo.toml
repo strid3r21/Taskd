@@ -1,0 +1,29 @@
+[package]
+name = "taskd"
+version = "0.1.0"
+edition = "2024"
+description = "A fast, lightweight task manager for Linux"
+license = "MIT"
+repository = "https://github.com/strid3r21/Taskd"
+rust-version = "1.85"
+
+[dependencies]
+# glow (OpenGL) backend only: no wgpu, no persistence/serde, no accesskit.
+eframe = { version = "0.36", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "x11",
+    "wayland",
+] }
+egui_extras = { version = "0.36", default-features = false }
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2

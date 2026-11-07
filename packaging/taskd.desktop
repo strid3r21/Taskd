@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Taskd
+GenericName=Task Manager
+Comment=Monitor processes, performance, services and startup apps
+Exec=taskd
+Icon=taskd
+Terminal=false
+Categories=System;Monitor;
+Keywords=task;manager;process;monitor;cpu;memory;kill;
+StartupWMClass=taskd

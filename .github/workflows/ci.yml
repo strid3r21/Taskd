@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    # Our own Linux runner (a container on the Unraid server): no Actions minutes used.
+    runs-on: [self-hosted, linux, unraid]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Release build
+        run: cargo build --release --locked
+
+      - name: Sampler benchmark
+        run: |
+          ./target/release/taskd --bench 300 | tee bench.txt
+          {
+            echo '### Sampler benchmark'
+            echo '```'
+            cat bench.txt
+            echo '```'
+            echo "Binary size: $(du -h target/release/taskd | cut -f1)"
+          } >> "$GITHUB_STEP_SUMMARY"

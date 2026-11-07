@@ -4,10 +4,12 @@ A fast, lightweight task manager for Linux. It's a single ~8 MB native binary wi
 
 ## Features
 
-- **Processes**: a sortable, virtualized table. You can filter by name, command, user or PID, show a tree view, hide kernel threads, show only your own processes, and choose which columns appear. Each process shows CPU, memory (private), RSS, disk read/write rates, threads, nice value, state, how long it has been running, and its command line. Busy CPU and memory cells are tinted.
+- **Apps**: running applications with each one's processes grouped together, and totals for CPU, memory, GPU and disk. Apps are recognized by their systemd app scope (Flatpaks, VS Code, apps launched by GNOME/KDE) or by matching their executable to an installed `.desktop` entry (menu launches on Cinnamon and others). Expand an app to see its processes, or end, kill, suspend or resume the whole app.
+- **Processes**: a sortable, virtualized table. You can filter by name, command, user or PID, show a tree view, hide kernel threads, show only your own processes, and choose which columns appear. Each process shows CPU, memory (private), GPU, RSS, disk read/write rates, threads, nice value, state, how long it has been running, and its command line. Busy CPU and memory cells are tinted.
 - **Process actions**: End (TERM), Kill (KILL), Suspend/Resume (STOP/CONT), HUP and INT, priority (nice), and copying the PID, name or command. If permission is denied, Taskd offers to retry through `pkexec`.
 - **Process details**: the executable, working directory, command line, cgroup, open fds, fd limit, environment size, memory breakdown and context switches.
-- **Performance**: live graphs for CPU (overall or per logical processor, plus frequency, temperature, load, context switches), memory (composition and swap), each disk (active time, read/write throughput), each network interface (receive/send, link speed) and each GPU (NVIDIA via NVML; AMD/Intel via sysfs). It shows utilization, VRAM, temperature and power.
+- **Performance**: live graphs for CPU (overall or per logical processor, plus frequency, temperature, load, context switches), memory (composition and swap), each disk (active time, read/write throughput), each network interface (receive/send, link speed) and each GPU (NVIDIA via NVML; AMD/Intel via sysfs). It shows utilization, VRAM, temperature and power. Below the graphs is a **top 10 apps & services** list for the selected resource (CPU, memory, GPU, disk).
+- **Per-process GPU usage**: NVML per-process samples on NVIDIA; DRM `fdinfo` engine counters on AMD/Intel.
 - **Users**: CPU, memory and disk usage per user. Double-click a user to filter the Processes tab to them.
 - **Services**: systemd system and user services. You can filter, start, stop, restart, enable and disable them; polkit prompts when needed.
 - **Startup**: XDG autostart entries. Toggling one writes a per-user override and never edits system files.
@@ -17,11 +19,11 @@ A fast, lightweight task manager for Linux. It's a single ~8 MB native binary wi
 
 | Key | Action |
 | --- | --- |
-| `Ctrl+1`…`Ctrl+5` | Switch tab |
+| `Ctrl+1`…`Ctrl+6` | Switch tab |
 | `Ctrl+F` | Focus the process filter |
 | `↑` / `↓` | Move selection |
 | `Enter` | Process details |
-| `Delete` / `Shift+Delete` | End / kill the selected process |
+| `Delete` / `Shift+Delete` | End / kill the selected process or app |
 | `Ctrl+P` | Pause or resume updates |
 | `F5` | Refresh now |
 
@@ -34,7 +36,8 @@ Taskd is built to cost almost nothing while it runs:
 - **Sampling runs on its own thread.** The UI only reads the latest immutable snapshot (an `Arc` swap), so a slow frame never delays sampling and vice versa.
 - **It repaints only when there's new data or input.** There's no continuous render loop and exactly one frame per sample. egui paints two frames for a zero-delay repaint request, so the sampler requests a 1 ms delay instead.
 - **The process table is virtualized.** Only visible rows are laid out, and the sorted/filtered/tree order is cached per snapshot.
-- **GPU telemetry loads NVML with `dlopen`** at runtime, so there's no link dependency. Services and startup entries load only when you open their tab.
+- **GPU telemetry loads NVML with `dlopen`** at runtime, so there's no link dependency. NVML's per-process query costs 1–3 ms, so it runs at most every ~2 s and its values are reused in between (NVML buffers samples, so nothing is lost). AMD/Intel DRM fds are found by a round-robin scan that only runs when such a GPU is present.
+- **Grouping into apps and services only runs while the Apps or Performance tab is visible**, once per snapshot. Services and startup entries load only when you open their tab.
 
 Measured on a Ryzen 9 5900X with ~590 processes:
 
@@ -85,6 +88,7 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 | `src/sampler.rs` | `/proc` + `/sys` sampling, snapshots, sampler thread |
 | `src/gpu.rs` | NVML (dlopen) and amdgpu sysfs |
 | `src/util.rs` | Raw/pread file readers, byte parsers, formatting |
+| `src/groups.rs` | Grouping processes into apps (desktop entries/app scopes) and services |
 | `src/actions.rs` | Signals, renice, pkexec fallback, process details |
 | `src/services.rs`, `src/startup.rs` | systemd and XDG autostart |
 | `src/app.rs` | Window, tabs, status bar, background jobs |

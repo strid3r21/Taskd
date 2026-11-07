@@ -61,6 +61,11 @@ pub struct ProcInfo {
     /// Seconds since boot at which the process started.
     pub start: f64,
     pub kernel: bool,
+    /// GPU utilization percent (NVML or DRM fdinfo), 0 when unknown.
+    pub gpu: f32,
+    /// systemd unit the process runs in: an app scope (`app-flatpak-com.discordapp.Discord-1234.scope`)
+    /// or a service (`ssh.service`). `None` for session scopes and kernel threads.
+    pub unit: Option<Arc<str>>,
 }
 
 #[derive(Clone, Default)]
@@ -152,6 +157,9 @@ struct ProcEntry {
     uid: u32,
     io_ok: bool,
     seen: u64,
+    /// Number of samples this process has been seen in.
+    age: u32,
+    unit: Option<Arc<str>>,
     /// Open fds re-read with pread each tick (see `util::pread_record`).
     stat_fd: Option<File>,
     statm_fd: Option<File>,
@@ -332,7 +340,7 @@ impl Sampler {
         self.sample_disks(elapsed);
         self.sample_net(elapsed);
         self.sample_misc();
-        self.snap.gpus = self.gpu.read();
+        self.snap.gpus = self.gpu.read(elapsed);
         let procs = self.sample_procs(elapsed, total_delta);
 
         let mut out = self.snap.clone();
@@ -559,6 +567,17 @@ impl Sampler {
             }
             let fresh = entry.seen == 0;
             entry.seen = current;
+            entry.age = entry.age.saturating_add(1);
+            if !kernel {
+                // Desktops may move a freshly launched app into its scope a moment later.
+                if entry.age == 3 {
+                    entry.unit = read_unit(pid, &mut self.path, &mut self.buf);
+                }
+                // AMD/Intel per-process GPU: find DRM fds shortly after start, then round-robin.
+                if self.gpu.wants_drm_scan() && (entry.age == 2 || (pid as u64 + current) % 30 == 0) {
+                    self.gpu.scan_drm_fds(pid);
+                }
+            }
 
             let cpu_ticks = st.utime + st.stime;
             let cpu = if fresh {
@@ -615,9 +634,18 @@ impl Sampler {
                 write_rate,
                 start: st.start as f64 / self.clk_tck,
                 kernel,
+                gpu: self.gpu.proc_util.get(&pid).copied().unwrap_or(0.0),
+                unit: entry.unit.clone(),
             });
         }
-        self.procs.retain(|_, e| e.seen == current);
+        let gpu = &mut self.gpu;
+        self.procs.retain(|&pid, e| {
+            let keep = e.seen == current;
+            if !keep {
+                gpu.forget_pid(pid);
+            }
+            keep
+        });
         out
     }
 
@@ -634,6 +662,7 @@ impl Sampler {
             }
         }
         let name = display_name(&comm, &cmd);
+        let unit = if kernel { None } else { read_unit(pid, &mut self.path, &mut self.buf) };
         ProcEntry {
             start,
             cpu: 0,
@@ -645,6 +674,8 @@ impl Sampler {
             uid,
             io_ok: !kernel,
             seen: 0,
+            age: 0,
+            unit,
             stat_fd: None,
             statm_fd: None,
             io_fd: None,
@@ -656,6 +687,24 @@ impl Default for Sampler {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The systemd unit a process runs in (app scope or service), from its cgroup.
+fn read_unit(pid: u32, path: &mut String, buf: &mut Vec<u8>) -> Option<Arc<str>> {
+    path.clear();
+    let _ = write!(path, "/proc/{pid}/cgroup");
+    read_into(path, buf).ok()?;
+    unit_from_cgroup(std::str::from_utf8(buf).ok()?).map(Arc::from)
+}
+
+pub fn unit_from_cgroup(text: &str) -> Option<&str> {
+    // cgroup v2: "0::/user.slice/.../app.slice/app-foo-123.scope"; hybrid v1 has a name=systemd line.
+    // Services may nest sub-cgroups (e.g. docker.service/foo), so take the innermost unit-like component.
+    let path = text.lines().find(|l| l.starts_with("0::") || l.contains(":name=systemd:"))?.rsplit_once(':')?.1;
+    path.rsplit('/').find(|c| {
+        (c.starts_with("app-") && c.ends_with(".scope"))
+            || (c.ends_with(".service") && !c.starts_with("user@") && !c.starts_with("user-runtime-dir@"))
+    })
 }
 
 /// Read `/proc/<pid>/<name>` through `slot`'s cached fd, opening (and caching) it if needed.
@@ -869,6 +918,20 @@ mod tests {
         assert_eq!(s.threads, 7);
         assert_eq!(s.start, 98765);
         assert_eq!(s.rss_pages, 256);
+    }
+
+    #[test]
+    fn units() {
+        let vscode =
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-com.microsoft.VSCode-3809464.scope\n";
+        assert_eq!(unit_from_cgroup(vscode), Some("app-com.microsoft.VSCode-3809464.scope"));
+        assert_eq!(unit_from_cgroup("0::/user.slice/user-1000.slice/session-c1.scope\n"), None);
+        assert_eq!(unit_from_cgroup("0::/system.slice/ssh.service\n"), Some("ssh.service"));
+        assert_eq!(unit_from_cgroup("0::/user.slice/user-1000.slice/user@1000.service/init.scope\n"), None);
+        assert_eq!(
+            unit_from_cgroup("0::/user.slice/user-1000.slice/user@1000.service/session.slice/pipewire.service\n"),
+            Some("pipewire.service")
+        );
     }
 
     #[test]

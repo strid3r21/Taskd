@@ -4,6 +4,7 @@ use eframe::egui::{self, Color32, RichText, Sense, Vec2};
 
 use crate::app::Ctx;
 use crate::graph::{self, CPU, DISK, GPU, MEM, NET, Series, graph};
+use crate::groups::Group;
 use crate::sampler::{History, Snapshot};
 use crate::util::{fmt_bits, fmt_bytes, fmt_duration, fmt_rate};
 
@@ -52,13 +53,32 @@ impl PerfState {
             egui::ScrollArea::vertical().show(ui, |ui| self.sidebar(ui, &s));
         });
         let window = window_label(c.cfg.interval_ms);
+        let groups = c.groups;
         egui::CentralPanel::default_margins().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| match self.sel {
-                Device::Cpu => cpu_view(ui, &s, c, &window),
-                Device::Mem => mem_view(ui, &s, &window),
-                Device::Disk(i) => disk_view(ui, &s, i, &window),
-                Device::Net(i) => net_view(ui, &s, i, &window),
-                Device::Gpu(i) => gpu_view(ui, &s, i, &window),
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                match self.sel {
+                    Device::Cpu => cpu_view(ui, &s, c, &window),
+                    Device::Mem => mem_view(ui, &s, &window),
+                    Device::Disk(i) => disk_view(ui, &s, i, &window),
+                    Device::Net(i) => net_view(ui, &s, i, &window),
+                    Device::Gpu(i) => gpu_view(ui, &s, i, &window),
+                }
+                match self.sel {
+                    Device::Cpu => top_list(ui, groups, Metric::Cpu, CPU),
+                    Device::Mem => top_list(ui, groups, Metric::Mem, MEM),
+                    Device::Disk(_) => top_list(ui, groups, Metric::Disk, DISK),
+                    Device::Gpu(_) => top_list(ui, groups, Metric::Gpu, GPU),
+                    Device::Net(_) => {
+                        ui.add_space(14.0);
+                        ui.label(
+                            RichText::new(
+                                "Per-app network usage isn't shown: Linux only exposes it per process \
+                                 to root (via eBPF/netlink).",
+                            )
+                            .weak(),
+                        );
+                    }
+                }
             });
         });
     }
@@ -353,4 +373,81 @@ fn gpu_view(ui: &mut egui::Ui, s: &Snapshot, i: usize, window: &str) {
     }
     items.push(("Vendor", g.vendor.to_string()));
     stats(ui, "gpu_stats", &items);
+}
+
+#[derive(Clone, Copy)]
+enum Metric {
+    Cpu,
+    Mem,
+    Gpu,
+    Disk,
+}
+
+/// "Top 10 apps & services" by one resource, below the device graphs.
+fn top_list(ui: &mut egui::Ui, groups: &[Group], m: Metric, color: Color32) {
+    let val = |g: &Group| -> f64 {
+        match m {
+            Metric::Cpu => g.cpu as f64,
+            Metric::Mem => g.mem as f64,
+            Metric::Gpu => g.gpu as f64,
+            Metric::Disk => g.read + g.write,
+        }
+    };
+    let fmt = |v: f64| -> String {
+        match m {
+            Metric::Cpu => format!("{v:.1}%"),
+            Metric::Mem => fmt_bytes(v as u64),
+            Metric::Gpu => format!("{v:.0}%"),
+            Metric::Disk => fmt_rate(v),
+        }
+    };
+    let title = match m {
+        Metric::Cpu => "Top apps & services by CPU",
+        Metric::Mem => "Top apps & services by memory",
+        Metric::Gpu => "Top apps & services by GPU",
+        Metric::Disk => "Top apps & services by disk I/O (all disks)",
+    };
+    let mut top: Vec<&Group> = groups.iter().filter(|g| val(g) > 0.0).collect();
+    top.sort_by(|a, b| val(b).total_cmp(&val(a)));
+    top.truncate(10);
+
+    ui.add_space(16.0);
+    ui.label(RichText::new(title).strong().size(15.0));
+    ui.add_space(4.0);
+    if top.is_empty() {
+        ui.label(RichText::new("Nothing is using this right now.").weak());
+        return;
+    }
+    let max = val(top[0]).max(f64::MIN_POSITIVE);
+    let bar_w = (ui.available_width() - 420.0).clamp(80.0, 320.0);
+    egui::Grid::new(("top", title)).num_columns(4).spacing([12.0, 5.0]).striped(true).show(ui, |ui| {
+        for (i, g) in top.iter().enumerate() {
+            ui.label(RichText::new(format!("{}", i + 1)).weak());
+            ui.horizontal(|ui| {
+                ui.set_min_width(240.0);
+                let r = ui.add(egui::Label::new(RichText::new(&g.name).strong()).truncate());
+                r.on_hover_text(format!("{} · {} process(es)", g.kind.label(), g.members.len()));
+                ui.label(RichText::new(g.kind.label()).small().weak());
+            });
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(bar_w, 10.0), Sense::hover());
+            let p = ui.painter();
+            p.rect_filled(rect, 2.0, color.gamma_multiply(0.12));
+            let w = rect.width() * (val(g) / max).clamp(0.0, 1.0) as f32;
+            p.rect_filled(egui::Rect::from_min_size(rect.min, Vec2::new(w, rect.height())), 2.0, color);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.set_min_width(80.0);
+                ui.label(fmt(val(g)));
+            });
+            ui.end_row();
+        }
+    });
+    if matches!(m, Metric::Disk) {
+        ui.label(
+            RichText::new(
+                "Disk I/O of other users' processes (most system services) is only visible when running as root.",
+            )
+            .small()
+            .weak(),
+        );
+    }
 }

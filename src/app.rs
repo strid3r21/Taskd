@@ -9,9 +9,11 @@ use eframe::egui::{self, Align, Key, Layout, RichText};
 
 use crate::actions;
 use crate::config::Config;
+use crate::groups::{Group, Grouper};
 use crate::sampler::{self, Shared, Snapshot};
 use crate::services::Service;
 use crate::startup::StartupEntry;
+use crate::ui_apps::AppsState;
 use crate::ui_performance::PerfState;
 use crate::ui_processes::ProcState;
 use crate::ui_tabs::{ServicesState, StartupState, UsersState};
@@ -19,6 +21,7 @@ use crate::util::{fmt_bytes, fmt_duration};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
+    Apps,
     Processes,
     Performance,
     Users,
@@ -27,9 +30,10 @@ pub enum Tab {
 }
 
 impl Tab {
-    const ALL: [Tab; 5] = [Tab::Processes, Tab::Performance, Tab::Users, Tab::Services, Tab::Startup];
+    const ALL: [Tab; 6] = [Tab::Apps, Tab::Processes, Tab::Performance, Tab::Users, Tab::Services, Tab::Startup];
     fn label(self) -> &'static str {
         match self {
+            Tab::Apps => "Apps",
             Tab::Processes => "Processes",
             Tab::Performance => "Performance",
             Tab::Users => "Users",
@@ -39,6 +43,7 @@ impl Tab {
     }
     fn key(self) -> &'static str {
         match self {
+            Tab::Apps => "apps",
             Tab::Processes => "processes",
             Tab::Performance => "performance",
             Tab::Users => "users",
@@ -66,6 +71,8 @@ pub struct Ctx<'a> {
     pub elevate: &'a mut Option<(String, Vec<String>)>,
     pub my_uid: u32,
     pub switch_to: &'a mut Option<Tab>,
+    /// Apps/services grouping; only computed while a tab that uses it is visible.
+    pub groups: &'a [Group],
 }
 
 impl Ctx<'_> {
@@ -106,6 +113,8 @@ pub struct App {
     elevate: Option<(String, Vec<String>)>,
     my_uid: u32,
     procs: ProcState,
+    apps: AppsState,
+    grouper: Grouper,
     perf: PerfState,
     users: UsersState,
     services: ServicesState,
@@ -149,6 +158,8 @@ impl App {
             tab: Tab::from_key(&cfg.tab),
             saved: cfg.clone(),
             procs: ProcState::default(),
+            apps: AppsState::default(),
+            grouper: Grouper::default(),
             perf: PerfState::default(),
             users: UsersState::default(),
             services: ServicesState::default(),
@@ -249,7 +260,8 @@ impl App {
         let (tab, pause, refresh) = ctx.input(|i| {
             let mut tab = None;
             if i.modifiers.command {
-                for (n, k) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5].into_iter().enumerate() {
+                for (n, k) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6].into_iter().enumerate()
+                {
                     if i.key_pressed(k) {
                         tab = Some(Tab::ALL[n]);
                     }
@@ -322,6 +334,9 @@ impl eframe::App for App {
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
 
         let mut switch_to = None;
+        if matches!(self.tab, Tab::Apps | Tab::Performance) {
+            self.grouper.update(&self.snap, self.my_uid);
+        }
         egui::CentralPanel::default_margins().show(ui, |ui| {
             let snap = self.snap.clone();
             let mut c = Ctx {
@@ -332,8 +347,10 @@ impl eframe::App for App {
                 elevate: &mut self.elevate,
                 my_uid: self.my_uid,
                 switch_to: &mut switch_to,
+                groups: &self.grouper.groups,
             };
             match self.tab {
+                Tab::Apps => self.apps.ui(ui, &mut c),
                 Tab::Processes => self.procs.ui(ui, &mut c),
                 Tab::Performance => self.perf.ui(ui, &mut c),
                 Tab::Users => self.users.ui(ui, &mut c, &mut self.procs),

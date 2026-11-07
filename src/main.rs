@@ -3,9 +3,11 @@ mod app;
 mod config;
 mod gpu;
 mod graph;
+mod groups;
 mod sampler;
 mod services;
 mod startup;
+mod ui_apps;
 mod ui_performance;
 mod ui_processes;
 mod ui_tabs;
@@ -89,5 +91,26 @@ fn once() {
     println!("{} processes, top by CPU:", p.len());
     for x in p.iter().take(8) {
         println!("  {:>7} {:<24} {:>5.1}% {:>10}", x.pid, x.name, x.cpu, util::fmt_bytes(x.mem));
+    }
+    let mut g = groups::Grouper::default();
+    g.update(&snap, unsafe { libc::getuid() });
+    let mut apps: Vec<_> = g.groups.iter().filter(|x| x.kind == groups::Kind::App && x.mine).collect();
+    apps.sort_by_key(|a| std::cmp::Reverse(a.mem));
+    println!("{} apps:", apps.len());
+    for a in apps {
+        println!("  {:<32} {:>3} procs {:>10} {:>5.1}% cpu", a.name, a.members.len(), util::fmt_bytes(a.mem), a.cpu);
+    }
+    let n_svc = g.groups.iter().filter(|x| x.kind == groups::Kind::Service).count();
+    println!(
+        "{n_svc} services, {} lone processes",
+        g.groups.iter().filter(|x| x.kind == groups::Kind::Process).count()
+    );
+    p.sort_by(|a, b| b.gpu.total_cmp(&a.gpu));
+    let gpu: Vec<_> = p.iter().filter(|x| x.gpu > 0.0).take(8).collect();
+    if !gpu.is_empty() {
+        println!("Top by GPU:");
+        for x in gpu {
+            println!("  {:>7} {:<24} {:>5.1}%", x.pid, x.name, x.gpu);
+        }
     }
 }

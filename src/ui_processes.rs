@@ -19,6 +19,7 @@ pub enum Col {
     User,
     Cpu,
     Mem,
+    Gpu,
     Read,
     Write,
     Threads,
@@ -29,12 +30,13 @@ pub enum Col {
 }
 
 impl Col {
-    pub const ALL: [Col; 12] = [
+    pub const ALL: [Col; 13] = [
         Col::Name,
         Col::Pid,
         Col::User,
         Col::Cpu,
         Col::Mem,
+        Col::Gpu,
         Col::Read,
         Col::Write,
         Col::Threads,
@@ -50,6 +52,7 @@ impl Col {
             Col::User => "user",
             Col::Cpu => "cpu",
             Col::Mem => "mem",
+            Col::Gpu => "gpu",
             Col::Read => "read",
             Col::Write => "write",
             Col::Threads => "threads",
@@ -66,6 +69,7 @@ impl Col {
             Col::User => "User",
             Col::Cpu => "CPU",
             Col::Mem => "Memory",
+            Col::Gpu => "GPU",
             Col::Read => "Disk read",
             Col::Write => "Disk write",
             Col::Threads => "Threads",
@@ -98,6 +102,7 @@ impl Col {
             Col::User => a.user.cmp(&b.user),
             Col::Cpu => a.cpu.total_cmp(&b.cpu),
             Col::Mem => a.mem.cmp(&b.mem),
+            Col::Gpu => a.gpu.total_cmp(&b.gpu),
             Col::Read => a.read_rate.total_cmp(&b.read_rate),
             Col::Write => a.write_rate.total_cmp(&b.write_rate),
             Col::Threads => a.threads.cmp(&b.threads),
@@ -371,7 +376,9 @@ impl ProcState {
 
     fn table(&mut self, ui: &mut egui::Ui, snap: &Snapshot, c: &Ctx) -> Option<Action> {
         let hidden = Self::hidden_cols(c.cfg);
-        let cols: Vec<Col> = Col::ALL.into_iter().filter(|c| !hidden.contains(c)).collect();
+        let no_gpu = snap.gpus.is_empty();
+        let cols: Vec<Col> =
+            Col::ALL.into_iter().filter(|c| !hidden.contains(c) && !(no_gpu && *c == Col::Gpu)).collect();
         let sort = Col::from_key(&c.cfg.sort_col).unwrap_or(Col::Cpu);
         let desc = c.cfg.sort_desc;
         let mut act: Option<Action> = None;
@@ -478,6 +485,10 @@ impl ProcState {
                             Col::Mem => {
                                 ui.painter().rect_filled(ui.max_rect(), 0.0, heat(p.mem as f32 / total_mem * 8.0));
                                 num(ui, fmt_bytes(p.mem));
+                            }
+                            Col::Gpu => {
+                                ui.painter().rect_filled(ui.max_rect(), 0.0, heat(p.gpu / 50.0));
+                                num(ui, format!("{:.0}%", p.gpu));
                             }
                             Col::Read => num(ui, fmt_rate(p.read_rate)),
                             Col::Write => num(ui, fmt_rate(p.write_rate)),
@@ -591,6 +602,7 @@ impl ProcState {
                                     row("CPU", &format!("{:.1}%", p.cpu));
                                     row("Memory (private)", &fmt_bytes(p.mem));
                                     row("Resident (RSS)", &fmt_bytes(p.rss));
+                                    row("GPU", &format!("{:.0}%", p.gpu));
                                     row(
                                         "Disk read / write",
                                         &format!("{} / {}", fmt_rate(p.read_rate), fmt_rate(p.write_rate)),

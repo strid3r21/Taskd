@@ -13,6 +13,7 @@ A fast, lightweight task manager for Linux. It's a single ~8 MB native binary wi
 - **Users**: CPU, memory and disk usage per user. Double-click a user to filter the Processes tab to them.
 - **Services**: systemd system and user services. You can filter, start, stop, restart, enable and disable them; polkit prompts when needed.
 - **Startup**: XDG autostart entries. Toggling one writes a per-user override and never edits system files.
+- **Auto-update**: at launch Taskd checks GitHub for a newer release (one API request). Tarball installs download it, verify it against `SHA256SUMS`, check that the new binary runs, swap it in atomically, and restart, all automatically. `.deb` installs show an **Update & restart** banner, which asks for your password. Use the ⚙ menu to turn the launch check off or check now, or run `taskdm --update` from a terminal.
 - **Settings**: refresh interval (250 ms to 10 s), pause, and remembered UI state (`~/.config/taskd/config`).
 
 ### Keyboard

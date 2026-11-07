@@ -64,7 +64,7 @@ pub enum JobResult {
     Startup(Vec<StartupEntry>),
     /// Result of an update check; `bool` = started by the user (report "up to date"/errors).
     UpdateCheck(Result<Option<updater::Release>, String>, bool),
-    UpdateInstalled(Result<std::path::PathBuf, String>),
+    UpdateInstalled(Result<std::path::PathBuf, String>, String),
 }
 
 #[derive(Default)]
@@ -201,11 +201,11 @@ impl App {
                 JobResult::Services(user, res) => self.services.loaded(user, res),
                 JobResult::Startup(list) => self.startup.loaded(list),
                 JobResult::UpdateCheck(res, manual) => self.update_checked(res, manual),
-                JobResult::UpdateInstalled(Ok(exe)) => {
+                JobResult::UpdateInstalled(Ok(exe), version) => {
                     // Settings are saved on every change, so it's safe to hand over right away.
-                    updater::restart(&exe);
+                    updater::restart(&exe, &version);
                 }
-                JobResult::UpdateInstalled(Err(e)) => {
+                JobResult::UpdateInstalled(Err(e), _) => {
                     self.update.installing = false;
                     self.status = Some((format!("Update failed: {e}"), true, Instant::now()));
                     self.update.last_error = Some(e);
@@ -221,8 +221,10 @@ impl App {
                 self.update.dismissed = false;
                 let silent = matches!(self.update.kind, Some(updater::InstallKind::Portable(_)));
                 self.update.available = Some(rel);
-                // Tarball installs need no password, so install right away when allowed.
-                if silent && self.cfg.auto_update {
+                // Tarball installs need no password, so install right away when allowed
+                // (unless we just restarted into this very version: see JUST_UPDATED_ENV).
+                let looping = self.update.available.as_ref().is_some_and(|r| updater::just_updated_to(&r.version));
+                if silent && self.cfg.auto_update && !looping {
                     self.start_install();
                 }
             }
@@ -247,7 +249,7 @@ impl App {
             return;
         }
         self.update.installing = true;
-        self.jobs.spawn(move || JobResult::UpdateInstalled(updater::install(&rel, &kind)));
+        self.jobs.spawn(move || JobResult::UpdateInstalled(updater::install(&rel, &kind), rel.version.clone()));
     }
 
     fn settings_menu(&mut self, ui: &mut egui::Ui) {

@@ -214,10 +214,20 @@ pub fn install(rel: &Release, kind: &InstallKind) -> Result<PathBuf, String> {
     }
 }
 
+/// Set on the restarted process: the version we just installed. If the "new" binary still
+/// sees that version as an update (a release whose binary reports an older version than
+/// its tag), it must not install it again, or it would loop forever.
+pub const JUST_UPDATED_ENV: &str = "TASKD_JUST_UPDATED_TO";
+
+pub fn just_updated_to(version: &str) -> bool {
+    std::env::var(JUST_UPDATED_ENV).is_ok_and(|v| v == version)
+}
+
 /// Start the freshly installed binary (detached) and exit this process.
-pub fn restart(exe: &Path) -> ! {
+pub fn restart(exe: &Path, version: &str) -> ! {
     use std::os::unix::process::CommandExt;
     let mut cmd = Command::new(exe);
+    cmd.env(JUST_UPDATED_ENV, version);
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     // SAFETY: setsid() in the child before exec is async-signal-safe.
     unsafe {

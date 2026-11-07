@@ -16,6 +16,8 @@ A fast, lightweight task manager for Linux. It's a single ~8 MB native binary wi
 - **Auto-update**: at launch Taskd checks GitHub for a newer release (one API request). Tarball installs download it, verify it against `SHA256SUMS`, check that the new binary runs, swap it in atomically, and restart, all automatically. `.deb` installs show an **Update & restart** banner, which asks for your password. Use the ⚙ menu to turn the launch check off or check now, or run `taskdm --update` from a terminal.
 - **Settings**: refresh interval (250 ms to 10 s), pause, and remembered UI state (`~/.config/taskd/config`).
 
+- **MCP server for local LLM agents**: `taskdm --mcp` lets an agent inspect the system (see [below](#mcp-server-for-llm-agents)).
+
 ### Keyboard
 
 | Key | Action |
@@ -55,6 +57,34 @@ taskdm --bench 300   # headless sampler benchmark
 taskdm --once        # one-shot text summary
 ```
 
+## MCP server for LLM agents
+
+`taskdm --mcp` runs Taskd headless as a [Model Context Protocol](https://modelcontextprotocol.io) server on stdio. Any MCP-capable agent (LM Studio, Ollama front-ends, Goose, Open WebUI via mcpo, Claude Desktop, …) can then look through your running tasks for problems. It uses the same sampler as the GUI, so the agent gets current rates, recent history, and processes grouped into apps and services, not one-off `ps` output (whose CPU% is a lifetime average).
+
+| Tool | What it gives the agent |
+| --- | --- |
+| `health_check` | Findings with severity and the apps responsible: CPU saturation, single-core bottlenecks, memory pressure, swapping, I/O wait, busy disks, GPU load/heat, temperatures, runaway or memory-hogging processes, zombie/stuck processes, failed services. **Start here.** |
+| `system_overview` | CPU, memory/swap, disks, network, GPUs, load, uptime |
+| `top_consumers` | Top apps/services (or processes) by CPU, memory, GPU or disk I/O |
+| `list_processes` | Filter by text, user or state; sort and limit |
+| `process_details` | Executable, command, parents/children, cgroup, memory breakdown, open files, limits |
+| `resource_history` | Min/avg/max/latest and a downsampled series for the last ~2 minutes |
+| `failed_services`, `service_logs` | Failed systemd units and their recent journal lines |
+
+**It's read-only by default.** The action tools `signal_process` (end/kill/suspend/resume) and `set_priority` only exist when you start it with `--mcp-allow-actions`; otherwise they aren't even offered to the model. Even then, PID 1, kernel threads and Taskd itself are refused, and you can't act on other users' processes without root. Nothing listens on the network. Command lines are included (truncated) and environment variables never are.
+
+Client configuration (the usual `mcpServers` format; use the full path, since GUI apps often don't have `~/.local/bin` on their `PATH`):
+
+```json
+{
+  "mcpServers": {
+    "taskd": { "command": "/home/YOU/.local/bin/taskdm", "args": ["--mcp"] }
+  }
+}
+```
+
+For a `.deb` install the command is `/usr/bin/taskdm`. Add `"--mcp-allow-actions"` to `args` only if you want the agent to be able to end processes.
+
 ## Install
 
 The package is called **`taskd-monitor`** and the command is **`taskdm`**. Ubuntu/Debian already ship an unrelated `taskd` package (the Taskwarrior sync server).
@@ -92,6 +122,8 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 | `src/gpu.rs` | NVML (dlopen) and amdgpu sysfs |
 | `src/util.rs` | Raw/pread file readers, byte parsers, formatting |
 | `src/groups.rs` | Grouping processes into apps (desktop entries/app scopes) and services |
+| `src/mcp.rs` | MCP server (stdio JSON-RPC): tools, health-check heuristics |
+| `src/updater.rs` | Self-update from GitHub releases |
 | `src/actions.rs` | Signals, renice, pkexec fallback, process details |
 | `src/services.rs`, `src/startup.rs` | systemd and XDG autostart |
 | `src/app.rs` | Window, tabs, status bar, background jobs |

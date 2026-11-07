@@ -4,6 +4,7 @@ mod config;
 mod gpu;
 mod graph;
 mod groups;
+mod mcp;
 mod sampler;
 mod services;
 mod startup;
@@ -26,6 +27,9 @@ OPTIONS:
     --bench [N]   Run the sampler N times (default 200) headless and print timings
     --once        Print one sample summary and exit
     --update      Check for a new release and install it
+    --mcp         Run as an MCP server on stdio for LLM agents (read-only)
+    --mcp-allow-actions
+                  With --mcp: also allow ending processes and changing priority
     -V, --version Print version
     -h, --help    Print this help
 ";
@@ -38,6 +42,8 @@ fn main() {
         Some("--bench") => bench(args.get(1).and_then(|n| n.parse().ok()).unwrap_or(200)),
         Some("--once") => once(),
         Some("--update") => std::process::exit(updater::cli()),
+        Some("--mcp") => std::process::exit(mcp::run(args.iter().any(|a| a == "--mcp-allow-actions"))),
+        Some("--mcp-allow-actions") if args.iter().any(|a| a == "--mcp") => std::process::exit(mcp::run(true)),
         Some(other) => {
             eprintln!("unknown option: {other}\n\n{HELP}");
             std::process::exit(2);

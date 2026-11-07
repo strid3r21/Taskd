@@ -82,11 +82,3 @@ jobs:
             dist/*.tar.gz
             dist/*.deb
             dist/SHA256SUMS
-
-      - uses: actions/upload-artifact@v4
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        with:
-          name: taskd-packages
-          path: |
-            dist/*.tar.gz
-            dist/*.deb

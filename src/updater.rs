@@ -340,9 +340,16 @@ mod tests {
 
     #[test]
     fn signatures() {
-        // A signature made with the release key over a known message (see packaging/release-key.pem).
-        assert!(verify_signature(b"tampered", &[0u8; 64]).is_err());
-        assert!(verify_signature(b"x", &[1u8; 10]).is_err());
+        // The real, CI-signed SHA256SUMS of v0.5.0 must verify against the built-in key...
+        let sums = include_bytes!("../tests/fixtures/SHA256SUMS-0.5.0");
+        let sig = include_bytes!("../tests/fixtures/SHA256SUMS-0.5.0.sig");
+        assert!(verify_signature(sums, sig).is_ok());
+        // ...and any change to it, or a bogus signature, must not.
+        let mut tampered = sums.to_vec();
+        tampered[0] ^= 1;
+        assert!(verify_signature(&tampered, sig).is_err());
+        assert!(verify_signature(sums, &[0u8; 64]).is_err());
+        assert!(verify_signature(sums, &[1u8; 10]).is_err());
     }
 
     #[test]

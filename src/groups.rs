@@ -261,7 +261,12 @@ impl ContainerNames {
         }
         g.refreshed = Some(std::time::Instant::now());
         let me = self.clone();
-        std::thread::spawn(move || {
+        std::thread::spawn(move || me.refresh_now());
+    }
+
+    /// Query docker/podman now (blocking).
+    fn refresh_now(&self) {
+        {
             let mut names = HashMap::new();
             for tool in ["docker", "podman"] {
                 let Ok(out) = std::process::Command::new(crate::actions::sys_bin(tool))
@@ -277,10 +282,11 @@ impl ContainerNames {
                     }
                 }
             }
-            if let Ok(mut g) = me.0.lock() {
+            if let Ok(mut g) = self.0.lock() {
                 g.names = names;
+                g.refreshed = Some(std::time::Instant::now());
             }
-        });
+        }
     }
 }
 
@@ -293,6 +299,12 @@ pub struct Grouper {
 }
 
 impl Grouper {
+    /// Resolve container names before the first grouping (for the background recorder, which
+    /// can afford to wait and shouldn't record a container under its id first).
+    pub fn prime_container_names(&self) {
+        self.containers.refresh_now();
+    }
+
     pub fn update(&mut self, snap: &Snapshot, my_uid: u32) {
         if self.generation == snap.generation && !self.groups.is_empty() {
             return;

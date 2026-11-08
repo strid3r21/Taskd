@@ -226,6 +226,7 @@ pub fn install(rel: &Release, kind: &InstallKind) -> Result<PathBuf, String> {
             std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
             std::fs::rename(&tmp, exe).map_err(|e| format!("{}: {e}", exe.display()))?;
             let _ = std::fs::remove_dir_all(&dir);
+            crate::recorder::restart_if_running();
             Ok(exe.clone())
         }
         InstallKind::Deb => {
@@ -251,6 +252,7 @@ pub fn install(rel: &Release, kind: &InstallKind) -> Result<PathBuf, String> {
                 });
             }
             let _ = std::fs::remove_dir_all(&dir);
+            crate::recorder::restart_if_running();
             Ok(PathBuf::from("/usr/bin/taskdm"))
         }
         InstallKind::Unmanaged => Err("this copy of Taskd wasn't installed from a release; update it manually".into()),

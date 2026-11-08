@@ -72,6 +72,9 @@ pub enum JobResult {
     ServiceLogs(String, Result<String, String>),
     /// "Find open file" results: matches and how many processes couldn't be inspected.
     FileHolders(Vec<crate::files::Holder>, usize),
+    History(crate::ui_history::Range, Vec<serde_json::Value>),
+    /// Background recorder enabled/disabled (or the error).
+    Recorder(Result<bool, String>),
     Startup(Vec<StartupEntry>),
     /// Result of an update check; `bool` = started by the user (report "up to date"/errors).
     UpdateCheck(Result<Option<updater::Release>, String>, bool),
@@ -145,6 +148,9 @@ pub struct App {
     startup: StartupState,
     update: UpdateState,
     tab_drag: Option<Tab>,
+    /// Recorder state last applied to the systemd user service (None = not yet this session).
+    recorder_applied: Option<bool>,
+    alerts_open: bool,
     /// Window geometry waiting to be saved once it has been stable for a moment.
     geom_pending: Option<(String, Instant)>,
 }
@@ -200,6 +206,8 @@ impl App {
         App {
             update,
             tab_drag: None,
+            recorder_applied: None,
+            alerts_open: false,
             geom_pending: None,
             shared,
             snap,
@@ -229,6 +237,12 @@ impl App {
                 JobResult::Services(user, res) => self.services.loaded(user, res),
                 JobResult::ServiceLogs(unit, res) => self.services.logs_loaded(unit, res),
                 JobResult::FileHolders(found, denied) => self.procs.holders_loaded(found, denied),
+                JobResult::History(range, recs) => self.perf.history.loaded(range, recs),
+                JobResult::Recorder(Ok(on)) => self.recorder_applied = Some(on),
+                JobResult::Recorder(Err(e)) => {
+                    self.status = Some((format!("Background recorder: {e}"), true, Instant::now()));
+                    self.recorder_applied = Some(!self.cfg.record); // don't retry in a loop
+                }
                 JobResult::Startup(list) => self.startup.loaded(list),
                 JobResult::UpdateCheck(res, manual) => self.update_checked(res, manual),
                 JobResult::UpdateInstalled(Ok(exe), version) => {
@@ -320,6 +334,108 @@ impl App {
         }
     }
 
+    /// Keep the systemd user service in line with the "record" setting. Only installed copies
+    /// manage the service: a development build must not register itself to run at login.
+    fn apply_recorder(&mut self) {
+        let want = self.cfg.record;
+        if self.recorder_applied == Some(want) {
+            return;
+        }
+        let Some(updater::InstallKind::Portable(_) | updater::InstallKind::Deb) = self.update.kind else {
+            self.recorder_applied = Some(want);
+            return;
+        };
+        self.recorder_applied = Some(want); // in flight; the job reports the outcome
+        self.jobs.spawn(move || {
+            let r = if want {
+                std::env::current_exe().map_err(|e| e.to_string()).and_then(|exe| crate::recorder::enable(&exe))
+            } else {
+                crate::recorder::disable()
+            };
+            JobResult::Recorder(r.map(|_| want))
+        });
+    }
+
+    fn alerts_window(&mut self, ctx: &egui::Context) {
+        if !self.alerts_open {
+            return;
+        }
+        let mut open = true;
+        let c = &mut self.cfg;
+        egui::Window::new("Alerts").open(&mut open).resizable(false).default_width(420.0).show(ctx, |ui| {
+            ui.label(RichText::new("Desktop notifications from the background recorder (0 = off).").weak());
+            if !c.record {
+                ui.colored_label(ui.visuals().warn_fg_color, "Background recording is off, so alerts won't fire.");
+            }
+            ui.add_space(4.0);
+            egui::Grid::new("alerts").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                ui.label("Available memory below");
+                ui.add(egui::DragValue::new(&mut c.alert_mem_pct).range(0.0..=90.0).suffix(" %"));
+                ui.end_row();
+                ui.label("CPU above");
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut c.alert_cpu_pct).range(0.0..=100.0).suffix(" %"));
+                    ui.label("for");
+                    ui.add(egui::DragValue::new(&mut c.alert_cpu_mins).range(1.0..=60.0).suffix(" min"));
+                });
+                ui.end_row();
+                ui.label("A disk busier than (5 min)");
+                ui.add(egui::DragValue::new(&mut c.alert_disk_pct).range(0.0..=100.0).suffix(" %"));
+                ui.end_row();
+                ui.label("CPU temperature above");
+                ui.add(egui::DragValue::new(&mut c.alert_cpu_temp).range(0.0..=120.0).suffix(" °C"));
+                ui.end_row();
+                ui.label("GPU temperature above");
+                ui.add(egui::DragValue::new(&mut c.alert_gpu_temp).range(0.0..=120.0).suffix(" °C"));
+                ui.end_row();
+                ui.label("Battery below (on battery)");
+                ui.add(egui::DragValue::new(&mut c.alert_battery_pct).range(0.0..=90.0).suffix(" %"));
+                ui.end_row();
+            });
+            ui.checkbox(&mut c.alert_swap, "When the system starts swapping heavily");
+            ui.checkbox(&mut c.alert_failed_services, "When a systemd service fails");
+            ui.separator();
+            ui.label(RichText::new("Per-app memory limits").strong());
+            let mut limits: Vec<(String, String)> = c
+                .alert_app_mem
+                .split(';')
+                .filter_map(|e| e.split_once('='))
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+                .collect();
+            let mut remove = None;
+            for (i, (name, gb)) in limits.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(name)
+                            .hint_text("App name, e.g. Firefox Web Browser")
+                            .desired_width(220.0),
+                    );
+                    ui.add(egui::TextEdit::singleline(gb).desired_width(40.0));
+                    ui.label("GB");
+                    if ui.small_button("✖").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                limits.remove(i);
+            }
+            if ui.button("+ Add limit").clicked() {
+                limits.push((String::new(), "4".into()));
+            }
+            c.alert_app_mem = limits
+                .iter()
+                .map(|(n, v)| format!("{}={}", n.replace([';', '='], " "), v.trim()))
+                .collect::<Vec<_>>()
+                .join(";");
+            ui.separator();
+            if ui.button("Send a test notification").clicked() {
+                std::thread::spawn(|| crate::recorder::notify("Taskd", "Alerts are working.", false));
+            }
+        });
+        self.alerts_open = open;
+    }
+
     fn settings_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("⚙", |ui| {
             let kind = self.update.kind.clone().unwrap_or(updater::InstallKind::Unmanaged);
@@ -337,6 +453,13 @@ impl App {
             });
             if ui.button("Reset tab order").clicked() {
                 self.cfg.tab_order.clear();
+            }
+            ui.separator();
+            ui.checkbox(&mut self.cfg.record, "Record history & alerts in the background")
+                .on_hover_text("A small user service (taskdm --record) keeps ~7 days of history and raises alerts, even with this window closed.");
+            if ui.button("Alerts…").clicked() {
+                self.alerts_open = true;
+                ui.close();
             }
             ui.separator();
             ui.checkbox(&mut self.cfg.auto_update, "Check for updates at launch").on_hover_text(match kind {
@@ -608,6 +731,8 @@ impl eframe::App for App {
 
         self.cfg.tab = self.tab.key().into();
         self.track_geometry(&ctx);
+        self.apply_recorder();
+        self.alerts_window(&ctx);
         if self.cfg != self.saved {
             self.cfg.save();
             self.saved = self.cfg.clone();

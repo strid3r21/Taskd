@@ -34,6 +34,7 @@ pub struct PerfState {
     renaming: Option<(String, String, String)>,
     /// Whether the "hidden items" drawer at the bottom of the sidebar is open.
     show_hidden: bool,
+    pub history: crate::ui_history::HistoryView,
 }
 
 /// The built-in name of a device ("CPU", "Disk 0 (nvme0n1)", …).
@@ -167,6 +168,19 @@ impl PerfState {
         let mut act = None;
         egui::CentralPanel::default_margins().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
+                if self.history.selector(ui, &mut c.cfg.perf_range) {
+                    use crate::ui_history::Source;
+                    let (src, color) = match self.sel {
+                        Device::Cpu => (Source::Cpu, CPU),
+                        Device::Mem => (Source::Mem, MEM),
+                        Device::Disk(i) => (Source::Disk(&s.disks[i].name), DISK),
+                        Device::Net(i) => (Source::Net(&s.nets[i].name), NET),
+                        Device::Gpu(i) => (Source::Gpu(i), GPU),
+                        Device::Battery(_) => (Source::Battery, BATTERY),
+                    };
+                    self.history.show(ui, c, src, &title, color);
+                    return;
+                }
                 match self.sel {
                     Device::Cpu => cpu_view(ui, &s, c, &window, &title),
                     Device::Mem => mem_view(ui, &s, &window, &title),

@@ -33,6 +33,8 @@ Taskd keeps itself up to date. Tarball installs update automatically at launch. 
 | **Services** | Right-click a systemd service to start, stop, restart, reload, pause/resume, enable or disable it, or see its processes and logs. |
 | **Startup** | Turn apps that launch at login on or off. |
 
+**History and alerts.** A small background recorder (a systemd user service, toggled in ⚙) keeps about a week of history. In the Performance tab, switch from **Live** to **1 h / 6 h / 24 h / 7 days** to see what happened while you were away; hover the graph to see which apps were running at that moment. The same recorder sends desktop **alerts** (low memory, CPU maxed out, overheating, a saturated disk, heavy swapping, a failed service, low battery, or an app over a memory limit you set), configurable under ⚙ → Alerts.
+
 Drag the top tabs to reorder them. The ⚙ menu has light/dark themes; window size and position are remembered.
 
 **Keyboard:** `Ctrl+1`–`6` switch tabs · `Ctrl+F` search · `Delete` / `Shift+Delete` end / kill · `Enter` details · `Ctrl+P` pause · `F5` refresh

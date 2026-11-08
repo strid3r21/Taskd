@@ -7,10 +7,12 @@ mod graph;
 mod groups;
 mod mcp;
 mod power;
+mod recorder;
 mod sampler;
 mod services;
 mod startup;
 mod ui_apps;
+mod ui_history;
 mod ui_performance;
 mod ui_processes;
 mod ui_tabs;
@@ -29,6 +31,7 @@ OPTIONS:
     --bench [N]   Run the sampler N times (default 200) headless and print timings
     --once        Print one sample summary and exit
     --update      Check for a new release and install it
+    --record      Background recorder for history and alerts (normally run as a user service)
     --mcp         Run as an MCP server on stdio for LLM agents (read-only)
     --mcp-allow-actions
                   With --mcp: also allow ending processes and changing priority
@@ -49,6 +52,7 @@ fn main() {
         Some("--bench") => bench(args.get(1).and_then(|n| n.parse().ok()).unwrap_or(200)),
         Some("--once") => once(),
         Some("--update") => std::process::exit(updater::cli()),
+        Some("--record") => std::process::exit(recorder::run()),
         Some("--mcp") => std::process::exit(mcp::run(args.iter().any(|a| a == "--mcp-allow-actions"))),
         Some("--mcp-allow-actions") if args.iter().any(|a| a == "--mcp") => std::process::exit(mcp::run(true)),
         Some(other) => {

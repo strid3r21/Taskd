@@ -28,6 +28,9 @@ pub struct AssistantState {
     key_loaded_for: Option<Provider>,
     models: Vec<String>,
     models_loading: bool,
+    testing: bool,
+    /// Result of the last connection test (cleared when the settings change).
+    test_result: Option<(Provider, String, String, Result<String, String>)>,
     pending_confirm: Option<(String, std::sync::mpsc::Sender<bool>)>,
 }
 
@@ -37,6 +40,8 @@ pub enum AiMsg {
     Confirm(String, std::sync::mpsc::Sender<bool>),
     Done(Result<String, String>, Vec<Value>),
     Models(Result<Vec<String>, String>),
+    /// (provider, base, model, outcome) of a connection test.
+    Test(Provider, String, String, Result<String, String>),
 }
 
 impl AssistantState {
@@ -51,6 +56,10 @@ impl AssistantState {
                     Ok(t) => self.items.push(Item::Assistant(t)),
                     Err(e) => self.items.push(Item::Error(e)),
                 }
+            }
+            AiMsg::Test(p, base, model, res) => {
+                self.testing = false;
+                self.test_result = Some((p, base, model, res));
             }
             AiMsg::Models(res) => {
                 self.models_loading = false;
@@ -135,6 +144,24 @@ impl AssistantState {
                     Err(e) => c.error(format!("Couldn't save the key: {e}")),
                 }
             }
+            if ui.add_enabled(!self.testing, egui::Button::new("Test connection")).clicked() {
+                self.testing = true;
+                self.test_result = None;
+                let (p, base, model, key) = (
+                    provider,
+                    c.cfg.ai_base.trim().to_string(),
+                    c.cfg.ai_model.trim().to_string(),
+                    self.key_edit.trim().to_string(),
+                );
+                let jobs = c.jobs.clone();
+                std::thread::spawn(move || {
+                    let res = ai::test_connection(p, &base, &model, &key);
+                    jobs.send(JobResult::Ai(AiMsg::Test(p, base, model, res)));
+                });
+            }
+            if self.testing {
+                ui.spinner();
+            }
             ui.checkbox(&mut c.cfg.ai_allow_actions, "Allow ending processes (asks each time)");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("New chat").clicked() {
@@ -143,6 +170,18 @@ impl AssistantState {
                 }
             });
         });
+        // Show the last test result while it still describes the current settings.
+        if let Some((p, base, model, _)) = &self.test_result
+            && (*p != provider || *base != c.cfg.ai_base.trim() || *model != c.cfg.ai_model.trim())
+        {
+            self.test_result = None;
+        }
+        if let Some((.., res)) = &self.test_result {
+            match res {
+                Ok(m) => ui.colored_label(egui::Color32::from_rgb(0x4c, 0xaf, 0x50), format!("✔ {m}")),
+                Err(e) => ui.colored_label(ui.visuals().error_fg_color, format!("✖ {e}")),
+            };
+        }
         if !provider.is_local(&c.cfg.ai_base) {
             ui.label(
                 RichText::new(format!(

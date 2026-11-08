@@ -172,7 +172,7 @@ fn http(method: &str, url: &str, headers: &[(&str, String)], body: Option<&Value
     let htext: String = headers.iter().map(|(k, v)| format!("{k}: {v}\n")).collect();
     write_private(&hfile, &htext)?;
     let mut cmd = Command::new(crate::actions::sys_bin("curl"));
-    cmd.args(["-sS", "--max-time", "600", "-X", method, "-H"])
+    cmd.args(["-sS", "--connect-timeout", "10", "--max-time", "600", "-X", method, "-H"])
         .arg(format!("@{}", hfile.display()))
         .args(["-w", "\n%{http_code}"])
         .arg(url)
@@ -255,6 +255,32 @@ pub fn list_models(p: Provider, base: &str, key: &str) -> Result<Vec<String>, St
     }
     ids.sort();
     Ok(ids)
+}
+
+/// Check that the endpoint answers, the key is accepted and the model exists. Uses the model
+/// list, so it costs no tokens.
+pub fn test_connection(p: Provider, base: &str, model: &str, key: &str) -> Result<String, String> {
+    if base.trim().is_empty() {
+        return Err("enter the server URL first".into());
+    }
+    if p.needs_key() && key.is_empty() {
+        return Err("enter an API key first".into());
+    }
+    let ids = list_models(p, base, key)?;
+    let model = model.trim();
+    let found = ids.iter().any(|m| m == model || m.strip_suffix(":latest") == Some(model));
+    Ok(if model.is_empty() {
+        format!("Connected: {} models available. Pick one.", ids.len())
+    } else if ids.is_empty() {
+        format!("Connected. This server doesn't list its models, so \u{201c}{model}\u{201d} couldn't be checked.")
+    } else if found {
+        format!("Connected: {model} is available.")
+    } else {
+        return Err(format!(
+            "Connected, but \u{201c}{model}\u{201d} isn't one of the {} models offered (use Load models)",
+            ids.len()
+        ));
+    })
 }
 
 // ------------------------------------------------------------------ agent loop
@@ -454,5 +480,36 @@ mod tests {
         write_private(&p, "x=1\n").unwrap();
         assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
         std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn test_connection_against_a_mock_server() {
+        use std::io::{BufRead, BufReader};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for (i, stream) in listener.incoming().take(3).enumerate() {
+                let mut s = stream.unwrap();
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut line = String::new();
+                while r.read_line(&mut line).is_ok_and(|n| n > 2) {
+                    line.clear();
+                }
+                let (status, body) = if i == 2 {
+                    ("401 Unauthorized", r#"{"error":{"message":"bad key"}}"#)
+                } else {
+                    ("200 OK", r#"{"data":[{"id":"llama3:latest"},{"id":"qwen3"}]}"#)
+                };
+                let _ =
+                    write!(s, "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        let ok = test_connection(Provider::Custom, &base, "llama3", "").unwrap();
+        assert!(ok.contains("llama3 is available"), "{ok}");
+        let missing = test_connection(Provider::Custom, &base, "gpt-9", "").unwrap_err();
+        assert!(missing.contains("isn't one of the 2 models"), "{missing}");
+        let denied = test_connection(Provider::Custom, &base, "qwen3", "k").unwrap_err();
+        assert!(denied.contains("401") && denied.contains("check the API key"), "{denied}");
+        assert!(test_connection(Provider::OpenAi, &base, "x", "").unwrap_err().contains("API key"));
     }
 }

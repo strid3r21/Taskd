@@ -1,5 +1,7 @@
 # Taskd
 
+![Taskd's Performance tab](screenshots/performance.png)
+
 A fast, lightweight task manager for Linux. It's a single native binary that uses about 1% of one CPU core while open.
 
 It shows your apps, processes, performance graphs (CPU, memory, disks, network, GPU), users, systemd services and startup apps. It can also act as an **MCP server**, so a local AI agent can look through your system for performance problems.
@@ -23,6 +25,8 @@ Then start **Taskd** from your app menu, or run `taskdm`.
 Taskd keeps itself up to date. Tarball installs update automatically at launch. `.deb` installs show an **Update & restart** banner, which asks for your password. Updates are **signed**: Taskd only installs a release whose checksums carry a valid signature from the project's release key. You can turn update checks off in the ⚙ menu.
 
 ## What's inside
+
+![Taskd's Apps tab](screenshots/apps.png)
 
 | Tab | What you can do |
 | --- | --- |

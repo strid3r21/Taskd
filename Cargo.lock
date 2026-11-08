@@ -2145,7 +2145,7 @@ dependencies = [
 
 [[package]]
 name = "taskd-monitor"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ed25519-compact",
  "eframe",

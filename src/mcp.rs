@@ -129,7 +129,19 @@ impl Server {
         Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
     }
 
-    fn tool_list(&self) -> Vec<Value> {
+    /// An in-process server sharing an existing sampler (used by the built-in assistant).
+    pub fn with_shared(shared: Arc<Shared>, allow_actions: bool) -> Self {
+        Server {
+            shared,
+            grouper: Grouper::default(),
+            // SAFETY: getuid never fails.
+            my_uid: unsafe { libc::getuid() },
+            allow_actions: allow_actions && !running_as_root(),
+            started: Instant::now() - Duration::from_secs(10),
+        }
+    }
+
+    pub fn tool_list(&self) -> Vec<Value> {
         let ro = json!({"readOnlyHint": true, "openWorldHint": false});
         let mut tools = vec![
             json!({

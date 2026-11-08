@@ -26,12 +26,13 @@ Taskd keeps itself up to date. Tarball installs update automatically at launch. 
 
 | Tab | What you can do |
 | --- | --- |
-| **Apps** | See running apps, Docker/Podman containers and VMs with their processes grouped together. End, kill, suspend or resume a whole app; stop or restart a container. |
+| **Apps** | See running apps, Docker/Podman containers and VMs with their processes grouped together. End, kill, suspend or resume a whole app; stop or restart a container; **limit an app's memory and CPU** (right-click → Limit resources). |
 | **Processes** | See every process with CPU (plus a mini history graph and total CPU time), memory, GPU, disk, threads and state. Filter, sort, use tree view, change priority, send signals. Details show open files and network connections; **Find open file…** tells you which process is holding a file. |
 | **Performance** | Live graphs for CPU (per core too), memory, each disk, network interface, GPU and battery, plus the top 10 apps and services using each one. Drag the sidebar to resize or reorder it; right-click an item to rename or hide it. |
 | **Users** | Resource use per user. Double-click a user to see their processes. |
-| **Services** | Right-click a systemd service to start, stop, restart, reload, pause/resume, enable or disable it, or see its processes and logs. |
+| **Services** | Right-click a systemd service to start, stop, restart, reload, pause/resume, enable or disable it, see its processes and logs, or limit its memory and CPU. |
 | **Startup** | Turn apps that launch at login on or off. |
+| **Assistant** | Ask an AI about your system ("why is it slow?"). Works with local models (Ollama, LM Studio) and with Claude, ChatGPT, DeepSeek, OpenRouter or any OpenAI-compatible API. It looks at live data through the same tools as the MCP server; ending processes is off unless you allow it, and every action asks first. Also from a terminal: `taskdm --ask "…"`. |
 
 **History and alerts.** A small background recorder (a systemd user service, toggled in ⚙) keeps about a week of history. In the Performance tab, switch from **Live** to **1 h / 6 h / 24 h / 7 days** to see what happened while you were away; hover the graph to see which apps were running at that moment. The same recorder sends desktop **alerts** (low memory, CPU maxed out, overheating, a saturated disk, heavy swapping, a failed service, low battery, or an app over a memory limit you set), configurable under ⚙ → Alerts.
 

@@ -102,6 +102,12 @@ settings! {
 
     /// Performance time range: "live", "1h", "6h", "24h" or "7d".
     perf_range: String = "live";
+    /// AI assistant: provider key (see ai::Provider), model id, API base URL.
+    ai_provider: String = "ollama";
+    ai_model: String = "";
+    ai_base: String = "";
+    /// Let the assistant end processes / change priority (each action still asks).
+    ai_allow_actions: bool = false;
     /// Background recorder (history + alerts) as a systemd user service.
     record: bool = true;
     record_interval_s: u64 = 10u64, clamp 2, 300;

@@ -58,7 +58,9 @@ pub fn record(s: &Snapshot, g: &Grouper) -> Value {
     // Round in f64: an f32 like 1.3 would serialize as 1.2999999523162842.
     let r1 = |v: f32| (v as f64 * 10.0).round() / 10.0;
     // Heaviest apps/services/containers: top 5 by CPU plus top 5 by memory.
-    let mut gs: Vec<_> = g.groups.iter().filter(|x| x.kind != Kind::Process || x.cpu > 1.0).collect();
+    // Lone processes only count when they're actually heavy (busy, or holding lots of memory).
+    let mut gs: Vec<_> =
+        g.groups.iter().filter(|x| x.kind != Kind::Process || x.cpu > 1.0 || x.mem > 200 * 1_048_576).collect();
     let mut top: Vec<Value> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     gs.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
@@ -466,7 +468,8 @@ mod tests {
         let r = record(&snap, &g);
         let line = r.to_string();
         assert!(line.len() < 4000, "record too big: {} bytes", line.len());
-        assert!(r["top"].as_array().is_some_and(|t| !t.is_empty()));
+        // `top` may legitimately be empty on an idle machine (e.g. a CI container).
+        assert!(r["top"].is_array() && r["cpu"].is_number() && r["mem"].is_number() && r["t"].is_u64());
     }
 
     #[test]

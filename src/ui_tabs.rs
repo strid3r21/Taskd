@@ -129,6 +129,7 @@ pub struct ServicesState {
     reload: bool,
     /// Log window: (unit, text or error, still loading).
     logs: Option<(String, Result<String, String>, bool)>,
+    limit: Option<crate::ui_limits::LimitDialog>,
 }
 
 /// Right-click actions on a service: (systemctl verb, menu label, hover help).
@@ -279,6 +280,7 @@ impl ServicesState {
             Control(String, &'static str, &'static str),
             Processes(String),
             Logs(String),
+            Limit(String),
         }
         let mut menu: Option<Menu> = None;
         let green =
@@ -349,6 +351,10 @@ impl ServicesState {
                             menu = Some(Menu::Logs(s.unit.clone()));
                             ui.close();
                         }
+                        if ui.button("Limit resources…").clicked() {
+                            menu = Some(Menu::Limit(s.unit.clone()));
+                            ui.close();
+                        }
                     });
                 });
             });
@@ -358,6 +364,15 @@ impl ServicesState {
         match menu {
             Some(Menu::Control(unit, verb, label)) => self.control(c, &unit, verb, label),
             Some(Menu::Logs(unit)) => self.show_logs(c, &unit),
+            Some(Menu::Limit(unit)) => {
+                let t = if self.user {
+                    crate::limits::Target::UserUnit(unit.clone())
+                } else {
+                    crate::limits::Target::SystemUnit(unit.clone())
+                };
+                self.limit =
+                    Some(crate::ui_limits::LimitDialog::new(unit.trim_end_matches(".service"), Some(t), Vec::new()));
+            }
             Some(Menu::Processes(unit)) => {
                 let pids: std::collections::HashSet<u32> =
                     c.snap.procs.iter().filter(|p| p.unit.as_deref() == Some(unit.as_str())).map(|p| p.pid).collect();
@@ -371,6 +386,11 @@ impl ServicesState {
             None => {}
         }
         self.logs_window(ui.ctx());
+        if let Some(d) = &mut self.limit
+            && !d.show(ui.ctx(), c, c.snap.cpu.logical)
+        {
+            self.limit = None;
+        }
     }
 }
 

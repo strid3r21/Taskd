@@ -27,17 +27,26 @@ pub struct AppsState {
     expanded: HashSet<String>,
     sort: Sort,
     desc: bool,
+    limit: Option<crate::ui_limits::LimitDialog>,
 }
 
 impl Default for AppsState {
     fn default() -> Self {
-        AppsState { filter: String::new(), selected: None, expanded: HashSet::new(), sort: Sort::Cpu, desc: true }
+        AppsState {
+            filter: String::new(),
+            selected: None,
+            expanded: HashSet::new(),
+            sort: Sort::Cpu,
+            desc: true,
+            limit: None,
+        }
     }
 }
 
 enum Act {
     /// `docker`/`podman` <verb> <container id>.
     Container(String, &'static str),
+    Limit(String),
     Select(String),
     Toggle(String),
     SignalApp(String, Signal),
@@ -219,6 +228,11 @@ impl AppsState {
                                     ui.close();
                                 }
                             }
+                            ui.separator();
+                            if ui.button("Limit resources…").clicked() {
+                                act = Some(Act::Limit(g.key.clone()));
+                                ui.close();
+                            }
                             if let Some(id) = g.key.strip_prefix("ctr:") {
                                 ui.separator();
                                 for (label, verb) in [("Stop container", "stop"), ("Restart container", "restart")] {
@@ -282,6 +296,16 @@ impl AppsState {
                 }
             }
             Some(Act::SignalPid(pid, sig)) => signal_many(c, &pid.to_string(), &[pid], sig),
+            Some(Act::Limit(key)) => {
+                if let Some(g) = apps.iter().find(|g| g.key == key) {
+                    let unit = g.members.iter().find_map(|&m| snap.procs[m as usize].unit.as_deref());
+                    // Only app scopes / containers can be limited live; session-launched apps can't.
+                    let unit = unit.filter(|u| !u.starts_with("session-"));
+                    let target = crate::limits::target(unit, key.strip_prefix("ctr:"));
+                    let exec = c.exec_for(&key).map(|e| crate::limits::exec_argv(&e)).unwrap_or_default();
+                    self.limit = Some(crate::ui_limits::LimitDialog::new(&g.name, target, exec));
+                }
+            }
             Some(Act::Container(id, verb)) => {
                 c.info(format!("{verb} container {}…", &id[..id.len().min(12)]));
                 c.jobs.spawn(move || {
@@ -300,6 +324,11 @@ impl AppsState {
                 });
             }
             None => {}
+        }
+        if let Some(d) = &mut self.limit
+            && !d.show(ui.ctx(), c, snap.cpu.logical)
+        {
+            self.limit = None;
         }
     }
 }

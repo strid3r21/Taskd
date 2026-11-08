@@ -56,6 +56,7 @@ pub struct Group {
 struct DesktopEntry {
     id: String,
     name: String,
+    exec: Option<String>,
 }
 
 #[derive(Default)]
@@ -132,7 +133,7 @@ impl DesktopIndex {
         }
         let (Some(name), true) = (name, app) else { return };
         let i = self.entries.len();
-        self.entries.push(DesktopEntry { id: stem.to_string(), name });
+        self.entries.push(DesktopEntry { id: stem.to_string(), name, exec: exec.clone() });
         self.by_id.insert(stem.to_lowercase(), i);
         if let Some(w) = wmclass {
             self.by_id.entry(w).or_insert(i);
@@ -301,6 +302,13 @@ pub struct Grouper {
 impl Grouper {
     /// Resolve container names before the first grouping (for the background recorder, which
     /// can afford to wait and shouldn't record a container under its id first).
+    /// The desktop entry `Exec=` line of an app group (`app:<desktop id>` keys).
+    pub fn exec_for(&self, key: &str) -> Option<String> {
+        let id = key.strip_prefix("app:")?;
+        let idx = self.index.as_ref()?;
+        idx.entries.iter().find(|e| e.id == id)?.exec.clone()
+    }
+
     pub fn prime_container_names(&self) {
         self.containers.refresh_now();
     }

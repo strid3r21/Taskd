@@ -23,6 +23,7 @@ use crate::util::{fmt_bytes, fmt_duration};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Apps,
+    Assistant,
     Processes,
     Performance,
     Users,
@@ -31,10 +32,12 @@ pub enum Tab {
 }
 
 impl Tab {
-    const ALL: [Tab; 6] = [Tab::Apps, Tab::Processes, Tab::Performance, Tab::Users, Tab::Services, Tab::Startup];
+    const ALL: [Tab; 7] =
+        [Tab::Apps, Tab::Processes, Tab::Performance, Tab::Users, Tab::Services, Tab::Startup, Tab::Assistant];
     fn label(self) -> &'static str {
         match self {
             Tab::Apps => "Apps",
+            Tab::Assistant => "Assistant",
             Tab::Processes => "Processes",
             Tab::Performance => "Performance",
             Tab::Users => "Users",
@@ -45,6 +48,7 @@ impl Tab {
     fn key(self) -> &'static str {
         match self {
             Tab::Apps => "apps",
+            Tab::Assistant => "assistant",
             Tab::Processes => "processes",
             Tab::Performance => "performance",
             Tab::Users => "users",
@@ -75,6 +79,7 @@ pub enum JobResult {
     History(crate::ui_history::Range, Vec<serde_json::Value>),
     /// Background recorder enabled/disabled (or the error).
     Recorder(Result<bool, String>),
+    Ai(crate::ui_assistant::AiMsg),
     Startup(Vec<StartupEntry>),
     /// Result of an update check; `bool` = started by the user (report "up to date"/errors).
     UpdateCheck(Result<Option<updater::Release>, String>, bool),
@@ -100,12 +105,18 @@ pub struct Ctx<'a> {
     pub switch_to: &'a mut Option<Tab>,
     /// Apps/services grouping; only computed while a tab that uses it is visible.
     pub groups: &'a [Group],
+    pub grouper: &'a Grouper,
 }
 
 impl Ctx<'_> {
     pub fn info(&mut self, msg: impl Into<String>) {
         *self.status = Some((msg.into(), false, Instant::now()));
     }
+    /// How to launch an app group (its desktop entry's Exec line), if known.
+    pub fn exec_for(&self, key: &str) -> Option<String> {
+        self.grouper.exec_for(key)
+    }
+
     pub fn error(&mut self, msg: impl Into<String>) {
         *self.status = Some((msg.into(), true, Instant::now()));
     }
@@ -118,6 +129,12 @@ pub struct Jobs {
 }
 
 impl Jobs {
+    /// Send a result from any thread (for workers that report progress before finishing).
+    pub fn send(&self, r: JobResult) {
+        let _ = self.tx.send(r);
+        self.ctx.request_repaint();
+    }
+
     pub fn spawn(&self, f: impl FnOnce() -> JobResult + Send + 'static) {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
@@ -141,6 +158,7 @@ pub struct App {
     my_uid: u32,
     procs: ProcState,
     apps: AppsState,
+    assistant: crate::ui_assistant::AssistantState,
     grouper: Grouper,
     perf: PerfState,
     users: UsersState,
@@ -215,6 +233,7 @@ impl App {
             saved: cfg.clone(),
             procs: ProcState::default(),
             apps: AppsState::default(),
+            assistant: Default::default(),
             grouper: Grouper::default(),
             perf: PerfState::default(),
             users: UsersState::default(),
@@ -238,6 +257,7 @@ impl App {
                 JobResult::ServiceLogs(unit, res) => self.services.logs_loaded(unit, res),
                 JobResult::FileHolders(found, denied) => self.procs.holders_loaded(found, denied),
                 JobResult::History(range, recs) => self.perf.history.loaded(range, recs),
+                JobResult::Ai(m) => self.assistant.on_msg(m),
                 JobResult::Recorder(Ok(on)) => self.recorder_applied = Some(on),
                 JobResult::Recorder(Err(e)) => {
                     self.status = Some((format!("Background recorder: {e}"), true, Instant::now()));
@@ -624,8 +644,8 @@ impl App {
             let mut tab = None;
             if i.modifiers.command {
                 let order = Tab::ordered(&self.cfg.tab_order);
-                for (n, k) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6].into_iter().enumerate()
-                {
+                let keys = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7];
+                for (n, k) in keys.into_iter().enumerate() {
                     if i.key_pressed(k) {
                         tab = order.get(n).copied();
                     }
@@ -713,9 +733,11 @@ impl eframe::App for App {
                 my_uid: self.my_uid,
                 switch_to: &mut switch_to,
                 groups: &self.grouper.groups,
+                grouper: &self.grouper,
             };
             match self.tab {
                 Tab::Apps => self.apps.ui(ui, &mut c),
+                Tab::Assistant => self.assistant.ui(ui, &mut c, &self.shared),
                 Tab::Processes => self.procs.ui(ui, &mut c),
                 Tab::Performance => self.perf.ui(ui, &mut c, &mut self.procs),
                 Tab::Users => self.users.ui(ui, &mut c, &mut self.procs),

@@ -1,10 +1,12 @@
 mod actions;
+mod ai;
 mod app;
 mod config;
 mod files;
 mod gpu;
 mod graph;
 mod groups;
+mod limits;
 mod mcp;
 mod power;
 mod recorder;
@@ -12,7 +14,9 @@ mod sampler;
 mod services;
 mod startup;
 mod ui_apps;
+mod ui_assistant;
 mod ui_history;
+mod ui_limits;
 mod ui_performance;
 mod ui_processes;
 mod ui_tabs;
@@ -31,6 +35,7 @@ OPTIONS:
     --bench [N]   Run the sampler N times (default 200) headless and print timings
     --once        Print one sample summary and exit
     --update      Check for a new release and install it
+    --ask <q>     Ask the configured AI assistant a question from the terminal
     --record      Background recorder for history and alerts (normally run as a user service)
     --mcp         Run as an MCP server on stdio for LLM agents (read-only)
     --mcp-allow-actions
@@ -53,6 +58,7 @@ fn main() {
         Some("--once") => once(),
         Some("--update") => std::process::exit(updater::cli()),
         Some("--record") => std::process::exit(recorder::run()),
+        Some("--ask") => std::process::exit(ask_cli(&args[1..].join(" "))),
         Some("--mcp") => std::process::exit(mcp::run(args.iter().any(|a| a == "--mcp-allow-actions"))),
         Some("--mcp-allow-actions") if args.iter().any(|a| a == "--mcp") => std::process::exit(mcp::run(true)),
         Some(other) => {
@@ -64,6 +70,40 @@ fn main() {
                 eprintln!("taskdm: {e}");
                 std::process::exit(1);
             }
+        }
+    }
+}
+
+/// `taskdm --ask "…"`: one question to the assistant configured in the app (read-only tools).
+fn ask_cli(question: &str) -> i32 {
+    if question.trim().is_empty() {
+        eprintln!("usage: taskdm --ask \"why is my computer slow?\"");
+        return 2;
+    }
+    let cfg = config::Config::load();
+    let provider = ai::Provider::from_key(&cfg.ai_provider);
+    let settings = ai::Settings {
+        provider,
+        model: cfg.ai_model.clone(),
+        base: if cfg.ai_base.is_empty() { provider.default_base().into() } else { cfg.ai_base.clone() },
+        key: ai::get_key(provider).unwrap_or_default(),
+    };
+    let shared = sampler::spawn(1000, || {});
+    let mut server = mcp::Server::with_shared(shared, false);
+    let emit = |e: ai::Event| match e {
+        ai::Event::ToolCall(n) => eprintln!("  [tool] {n}"),
+        ai::Event::Confirm(_, tx) => {
+            let _ = tx.send(false);
+        }
+    };
+    match ai::ask(&settings, &mut Vec::new(), question, &mut server, &emit) {
+        Ok(a) => {
+            println!("{a}");
+            0
+        }
+        Err(e) => {
+            eprintln!("taskdm: {e}");
+            1
         }
     }
 }

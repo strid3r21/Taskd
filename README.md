@@ -8,7 +8,15 @@ It shows your apps, processes, performance graphs (CPU, memory, disks, network, 
 
 ## Install
 
-Download the latest release from the [Releases page](https://github.com/strid3r21/Taskd/releases), then either:
+Paste this into a terminal. It needs no root and installs to `~/.local`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/strid3r21/Taskd/main/install.sh | sh
+```
+
+It downloads the latest release, checks its signature and checksum, and adds Taskd to your app menu. You can [read the script](install.sh) first.
+
+Or download a file from the [Releases page](https://github.com/strid3r21/Taskd/releases):
 
 ```sh
 # Debian / Ubuntu / Mint
@@ -16,6 +24,12 @@ sudo apt install ./taskd-monitor_*_amd64.deb
 
 # Any distro (installs to ~/.local, no root needed)
 tar xzf taskd-monitor-*-x86_64-linux.tar.gz && ./taskd-monitor-*/install.sh
+```
+
+Or build it from the git address with [Rust](https://rustup.rs). This installs only the command, with no app menu entry:
+
+```sh
+cargo install --locked --git https://github.com/strid3r21/Taskd
 ```
 
 Then start **Taskd** from your app menu, or run `taskdm`.

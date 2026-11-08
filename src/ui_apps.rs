@@ -6,7 +6,7 @@ use eframe::egui::{self, Align, Color32, Key, Layout, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
 
 use crate::actions::{self, ActionError, Signal};
-use crate::app::Ctx;
+use crate::app::{Ctx, JobResult};
 use crate::groups::{Group, Kind};
 use crate::util::{fmt_bytes, fmt_rate};
 
@@ -36,6 +36,8 @@ impl Default for AppsState {
 }
 
 enum Act {
+    /// `docker`/`podman` <verb> <container id>.
+    Container(String, &'static str),
     Select(String),
     Toggle(String),
     SignalApp(String, Signal),
@@ -55,7 +57,8 @@ impl AppsState {
         let mut apps: Vec<&Group> = c
             .groups
             .iter()
-            .filter(|g| g.kind == Kind::App && g.mine)
+            // Your apps, plus containers and VMs (which usually run as root).
+            .filter(|g| (g.kind == Kind::App && g.mine) || matches!(g.kind, Kind::Container | Kind::Vm))
             .filter(|g| needle.is_empty() || g.name.to_lowercase().contains(&needle))
             .collect();
         let (sort, desc) = (self.sort, self.desc);
@@ -174,6 +177,9 @@ impl AppsState {
                                 act = Some(Act::Toggle(g.key.clone()));
                             }
                             ui.add(egui::Label::new(RichText::new(&g.name).strong()).selectable(false).truncate());
+                            if g.kind != Kind::App {
+                                ui.label(RichText::new(g.kind.label()).small().weak());
+                            }
                         });
                         row.col(|ui| num(ui, g.members.len().to_string()));
                         row.col(|ui| {
@@ -211,6 +217,15 @@ impl AppsState {
                                 if ui.button(label).clicked() {
                                     act = Some(Act::SignalApp(g.key.clone(), sig));
                                     ui.close();
+                                }
+                            }
+                            if let Some(id) = g.key.strip_prefix("ctr:") {
+                                ui.separator();
+                                for (label, verb) in [("Stop container", "stop"), ("Restart container", "restart")] {
+                                    if ui.button(label).on_hover_text("Cleanly, through docker/podman").clicked() {
+                                        act = Some(Act::Container(id.to_string(), verb));
+                                        ui.close();
+                                    }
                                 }
                             }
                         });
@@ -267,6 +282,23 @@ impl AppsState {
                 }
             }
             Some(Act::SignalPid(pid, sig)) => signal_many(c, &pid.to_string(), &[pid], sig),
+            Some(Act::Container(id, verb)) => {
+                c.info(format!("{verb} container {}…", &id[..id.len().min(12)]));
+                c.jobs.spawn(move || {
+                    // Whichever runtime owns it: docker first, then podman.
+                    let mut last = String::new();
+                    for tool in ["docker", "podman"] {
+                        match std::process::Command::new(actions::sys_bin(tool)).args([verb, "--", &id]).output() {
+                            Ok(o) if o.status.success() => {
+                                return JobResult::Status(format!("{verb} container: done"), false);
+                            }
+                            Ok(o) => last = String::from_utf8_lossy(&o.stderr).trim().to_string(),
+                            Err(_) => {}
+                        }
+                    }
+                    JobResult::Status(format!("{verb} container failed: {last}"), true)
+                });
+            }
             None => {}
         }
     }

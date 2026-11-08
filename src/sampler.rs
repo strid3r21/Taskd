@@ -17,6 +17,8 @@ use crate::util::{
 };
 
 pub const HISTORY: usize = 120;
+/// Samples of per-process CPU history kept for the sparkline column.
+pub const SPARK: usize = 32;
 
 /// Fixed-capacity ring of recent samples, used for graphs.
 #[derive(Clone, Default)]
@@ -63,6 +65,12 @@ pub struct ProcInfo {
     pub kernel: bool,
     /// GPU utilization percent (NVML or DRM fdinfo), 0 when unknown.
     pub gpu: f32,
+    /// Total CPU time consumed (user + system), seconds.
+    pub cpu_time: f64,
+    /// Recent CPU history as % of one core (0..=100, capped), oldest first; `spark_len` valid entries
+    /// at the end. Fixed-size so snapshots stay allocation-free.
+    pub spark: [u8; SPARK],
+    pub spark_len: u8,
     /// systemd unit the process runs in: an app scope (`app-flatpak-com.discordapp.Discord-1234.scope`)
     /// or a service (`ssh.service`). `None` for session scopes and kernel threads.
     pub unit: Option<Arc<str>>,
@@ -139,6 +147,7 @@ pub struct Snapshot {
     pub disks: Vec<DiskInfo>,
     pub nets: Vec<NetInfo>,
     pub gpus: Vec<GpuInfo>,
+    pub batteries: Vec<crate::power::Battery>,
     pub load: [f32; 3],
     pub uptime: f64,
     pub boot_time: u64,
@@ -149,6 +158,8 @@ pub struct Snapshot {
 struct ProcEntry {
     start: u64,
     cpu: u64,
+    spark: [u8; SPARK],
+    spark_len: u8,
     rd: u64,
     wr: u64,
     name: Arc<str>,
@@ -192,6 +203,7 @@ pub struct Sampler {
     temp_file: Option<CachedFile>,
     sys: SysFiles,
     gpu: GpuReader,
+    power: crate::power::PowerReader,
     generation: u64,
     empty: Arc<str>,
     fd_limit: u64,
@@ -226,6 +238,7 @@ impl Sampler {
                 uptime: CachedFile::new("/proc/uptime", true),
             },
             gpu: GpuReader::new(),
+            power: crate::power::PowerReader::new(),
             generation: 0,
             empty: Arc::from(""),
             fd_limit: raise_fd_limit(),
@@ -345,6 +358,7 @@ impl Sampler {
         self.generation += 1;
         if self.generation % 30 == 0 {
             self.rescan_devices();
+            self.power.rescan();
         }
 
         let total_delta = self.sample_cpu(elapsed);
@@ -353,6 +367,7 @@ impl Sampler {
         self.sample_net(elapsed);
         self.sample_misc();
         self.snap.gpus = self.gpu.read(elapsed);
+        self.snap.batteries = self.power.read();
         let procs = self.sample_procs(elapsed, total_delta);
 
         let mut out = self.snap.clone();
@@ -604,6 +619,8 @@ impl Sampler {
                     // Keep the counters so rates stay continuous; io access is re-probed
                     // because the owner may have changed (setuid programs).
                     fresh.cpu = old.cpu;
+                    fresh.spark = old.spark;
+                    fresh.spark_len = old.spark_len;
                     fresh.rd = old.rd;
                     fresh.wr = old.wr;
                     fresh.seen = old.seen;
@@ -638,6 +655,11 @@ impl Sampler {
                 (100.0 * cpu_ticks.saturating_sub(entry.cpu) as f64 / jiffies).min(100.0) as f32
             };
             entry.cpu = cpu_ticks;
+            if !fresh {
+                entry.spark.copy_within(1.., 0);
+                entry.spark[SPARK - 1] = (cpu * ncpu as f32).clamp(0.0, 100.0).round() as u8;
+                entry.spark_len = (entry.spark_len + 1).min(SPARK as u8);
+            }
 
             let (mut read_rate, mut write_rate) = (0.0, 0.0);
             let (mut mem, mut rss) = (0, st.rss_pages * self.page_size);
@@ -687,6 +709,9 @@ impl Sampler {
                 start: st.start as f64 / self.clk_tck,
                 kernel,
                 gpu: self.gpu.proc_util.get(&pid).copied().unwrap_or(0.0),
+                cpu_time: cpu_ticks as f64 / self.clk_tck,
+                spark: entry.spark,
+                spark_len: entry.spark_len,
                 unit: entry.unit.clone(),
             });
         }
@@ -719,6 +744,8 @@ impl Sampler {
         ProcEntry {
             start,
             cpu: 0,
+            spark: [0; SPARK],
+            spark_len: 0,
             rd: 0,
             wr: 0,
             name: Arc::from(name),
@@ -756,7 +783,7 @@ pub fn unit_from_cgroup(text: &str) -> Option<&str> {
     // Services may nest sub-cgroups (e.g. docker.service/foo), so take the innermost unit-like component.
     let path = text.lines().find(|l| l.starts_with("0::") || l.contains(":name=systemd:"))?.rsplit_once(':')?.1;
     path.rsplit('/').find(|c| {
-        (c.starts_with("app-") && c.ends_with(".scope"))
+        (c.ends_with(".scope") && ["app-", "docker-", "libpod-", "machine-"].iter().any(|p| c.starts_with(p)))
             || (c.ends_with(".service") && !c.starts_with("user@") && !c.starts_with("user-runtime-dir@"))
     })
 }
@@ -1019,6 +1046,17 @@ mod tests {
         assert_eq!(unit_from_cgroup(vscode), Some("app-com.microsoft.VSCode-3809464.scope"));
         assert_eq!(unit_from_cgroup("0::/user.slice/user-1000.slice/session-c1.scope\n"), None);
         assert_eq!(unit_from_cgroup("0::/system.slice/ssh.service\n"), Some("ssh.service"));
+        assert_eq!(unit_from_cgroup("0::/system.slice/docker-ff0c.scope\n"), Some("docker-ff0c.scope"));
+        assert_eq!(
+            unit_from_cgroup(
+                "0::/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-abc.scope/container\n"
+            ),
+            Some("libpod-abc.scope")
+        );
+        assert_eq!(
+            unit_from_cgroup("0::/machine.slice/machine-qemu\\x2d1\\x2dwin11.scope\n"),
+            Some("machine-qemu\\x2d1\\x2dwin11.scope")
+        );
         assert_eq!(unit_from_cgroup("0::/user.slice/user-1000.slice/user@1000.service/init.scope\n"), None);
         assert_eq!(
             unit_from_cgroup("0::/user.slice/user-1000.slice/user@1000.service/session.slice/pipewire.service\n"),

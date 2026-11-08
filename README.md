@@ -26,12 +26,14 @@ Taskd keeps itself up to date. Tarball installs update automatically at launch. 
 
 | Tab | What you can do |
 | --- | --- |
-| **Apps** | See running apps with their processes grouped together. End, kill, suspend or resume a whole app. |
-| **Processes** | See every process with CPU, memory, GPU, disk, threads and state. Filter, sort, use tree view, change priority, send signals, open details. |
-| **Performance** | Live graphs for CPU (per core too), memory, each disk, network interface and GPU, plus the top 10 apps and services using each one. Drag the sidebar to resize or reorder it; right-click an item to rename or hide it. |
+| **Apps** | See running apps, Docker/Podman containers and VMs with their processes grouped together. End, kill, suspend or resume a whole app; stop or restart a container. |
+| **Processes** | See every process with CPU (plus a mini history graph and total CPU time), memory, GPU, disk, threads and state. Filter, sort, use tree view, change priority, send signals. Details show open files and network connections; **Find open file…** tells you which process is holding a file. |
+| **Performance** | Live graphs for CPU (per core too), memory, each disk, network interface, GPU and battery, plus the top 10 apps and services using each one. Drag the sidebar to resize or reorder it; right-click an item to rename or hide it. |
 | **Users** | Resource use per user. Double-click a user to see their processes. |
 | **Services** | Right-click a systemd service to start, stop, restart, reload, pause/resume, enable or disable it, or see its processes and logs. |
 | **Startup** | Turn apps that launch at login on or off. |
+
+Drag the top tabs to reorder them. The ⚙ menu has light/dark themes; window size and position are remembered.
 
 **Keyboard:** `Ctrl+1`–`6` switch tabs · `Ctrl+F` search · `Delete` / `Shift+Delete` end / kill · `Enter` details · `Ctrl+P` pause · `F5` refresh
 

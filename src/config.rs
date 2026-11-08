@@ -22,6 +22,12 @@ pub struct Config {
     pub perf_names: String,
     /// Hidden sidebar items: comma-separated device keys.
     pub perf_hidden: String,
+    /// Top tab order: comma-separated tab keys.
+    pub tab_order: String,
+    /// "system", "light" or "dark".
+    pub theme: String,
+    /// Last window geometry: "w,h,x,y,maximized" (empty = default).
+    pub window: String,
 }
 
 impl Default for Config {
@@ -42,6 +48,9 @@ impl Default for Config {
             perf_order: String::new(),
             perf_names: String::new(),
             perf_hidden: String::new(),
+            tab_order: String::new(),
+            theme: "system".into(),
+            window: String::new(),
         }
     }
 }
@@ -77,6 +86,9 @@ impl Config {
                 "perf_order" => c.perf_order = v.into(),
                 "perf_names" => c.perf_names = v.into(),
                 "perf_hidden" => c.perf_hidden = v.into(),
+                "tab_order" => c.tab_order = v.into(),
+                "theme" => c.theme = v.into(),
+                "window" => c.window = v.into(),
                 _ => {}
             }
         }
@@ -90,7 +102,7 @@ impl Config {
         }
         let text = format!(
             "interval_ms={}\ntab={}\nsort_col={}\nsort_desc={}\ntree={}\nshow_kernel={}\nonly_mine={}\n\
-             per_core_percent={}\ncpu_per_core_graphs={}\nhidden_cols={}\nauto_update={}\nperf_sidebar={}\nperf_order={}\nperf_names={}\nperf_hidden={}\n",
+             per_core_percent={}\ncpu_per_core_graphs={}\nhidden_cols={}\nauto_update={}\nperf_sidebar={}\nperf_order={}\nperf_names={}\nperf_hidden={}\ntab_order={}\ntheme={}\nwindow={}\n",
             self.interval_ms,
             self.tab,
             self.sort_col,
@@ -105,7 +117,10 @@ impl Config {
             self.perf_sidebar,
             self.perf_order,
             self.perf_names,
-            self.perf_hidden
+            self.perf_hidden,
+            self.tab_order,
+            self.theme,
+            self.window
         );
         let _ = std::fs::write(p, text);
     }

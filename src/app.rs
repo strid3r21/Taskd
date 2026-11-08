@@ -55,6 +55,14 @@ impl Tab {
     fn from_key(k: &str) -> Tab {
         Tab::ALL.into_iter().find(|t| t.key() == k).unwrap_or(Tab::Processes)
     }
+
+    /// Tabs in the user's order; tabs missing from the saved order keep their default place at the end.
+    fn ordered(order: &str) -> Vec<Tab> {
+        let pos: Vec<&str> = order.split(',').collect();
+        let mut v = Tab::ALL.to_vec();
+        v.sort_by_key(|t| pos.iter().position(|p| *p == t.key()).unwrap_or(usize::MAX));
+        v
+    }
 }
 
 /// Results of work done off the UI thread.
@@ -62,6 +70,8 @@ pub enum JobResult {
     Status(String, bool),
     Services(bool, Result<Vec<Service>, String>),
     ServiceLogs(String, Result<String, String>),
+    /// "Find open file" results: matches and how many processes couldn't be inspected.
+    FileHolders(Vec<crate::files::Holder>, usize),
     Startup(Vec<StartupEntry>),
     /// Result of an update check; `bool` = started by the user (report "up to date"/errors).
     UpdateCheck(Result<Option<updater::Release>, String>, bool),
@@ -134,16 +144,30 @@ pub struct App {
     services: ServicesState,
     startup: StartupState,
     update: UpdateState,
+    tab_drag: Option<Tab>,
+    /// Window geometry waiting to be saved once it has been stable for a moment.
+    geom_pending: Option<(String, Instant)>,
 }
 
 pub fn run() -> eframe::Result {
     let cfg = Config::load();
-    let viewport = egui::ViewportBuilder::default()
+    let mut viewport = egui::ViewportBuilder::default()
         .with_title(format!("Taskd {}", env!("CARGO_PKG_VERSION")))
         .with_app_id("taskd-monitor")
         .with_inner_size([1040.0, 700.0])
         .with_min_inner_size([620.0, 400.0])
         .with_icon(Arc::new(icon()));
+    // Restore the last window geometry (position is ignored on Wayland, which is fine).
+    let g: Vec<f32> = cfg.window.split(',').filter_map(|v| v.parse().ok()).collect();
+    if let [w, h, x, y, max] = g[..] {
+        if (400.0..10000.0).contains(&w) && (300.0..10000.0).contains(&h) {
+            viewport = viewport.with_inner_size([w, h]);
+        }
+        if (-200.0..20000.0).contains(&x) && (-200.0..20000.0).contains(&y) {
+            viewport = viewport.with_position([x, y]);
+        }
+        viewport = viewport.with_maximized(max > 0.5);
+    }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native(
         "Taskd",
@@ -172,8 +196,11 @@ impl App {
         if cfg.auto_update {
             jobs.spawn(|| JobResult::UpdateCheck(updater::check(), false));
         }
+        cc.egui_ctx.set_theme(theme_pref(&cfg.theme));
         App {
             update,
+            tab_drag: None,
+            geom_pending: None,
             shared,
             snap,
             tab: Tab::from_key(&cfg.tab),
@@ -201,6 +228,7 @@ impl App {
                 JobResult::Status(m, err) => self.status = Some((m, err, Instant::now())),
                 JobResult::Services(user, res) => self.services.loaded(user, res),
                 JobResult::ServiceLogs(unit, res) => self.services.logs_loaded(unit, res),
+                JobResult::FileHolders(found, denied) => self.procs.holders_loaded(found, denied),
                 JobResult::Startup(list) => self.startup.loaded(list),
                 JobResult::UpdateCheck(res, manual) => self.update_checked(res, manual),
                 JobResult::UpdateInstalled(Ok(exe), version) => {
@@ -256,11 +284,60 @@ impl App {
         self.jobs.spawn(move || JobResult::UpdateInstalled(updater::install(&rel, &kind), rel.version.clone()));
     }
 
+    /// Remember size/position/maximized, saved once the window has stopped moving for a second
+    /// (window drags would otherwise rewrite the config every frame).
+    fn track_geometry(&mut self, ctx: &egui::Context) {
+        let (inner, outer, max, min) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.inner_rect, v.outer_rect, v.maximized.unwrap_or(false), v.minimized.unwrap_or(false))
+        });
+        let (Some(inner), false) = (inner, min) else { return };
+        let old: Vec<f32> = self.cfg.window.split(',').filter_map(|v| v.parse().ok()).collect();
+        let geom = if max {
+            // Keep the restored size/position so un-maximizing goes back to it.
+            match old[..] {
+                [w, h, x, y, _] => format!("{w},{h},{x},{y},1"),
+                _ => format!("{},{},0,0,1", inner.width().round(), inner.height().round()),
+            }
+        } else {
+            let pos = outer.map_or(inner.min, |r| r.min);
+            format!("{},{},{},{},0", inner.width().round(), inner.height().round(), pos.x.round(), pos.y.round())
+        };
+        if geom == self.cfg.window {
+            self.geom_pending = None;
+            return;
+        }
+        match &self.geom_pending {
+            Some((g, since)) if *g == geom && since.elapsed() >= Duration::from_secs(1) => {
+                self.cfg.window = geom;
+                self.geom_pending = None;
+            }
+            Some((g, _)) if *g == geom => ctx.request_repaint_after(Duration::from_millis(1100)),
+            _ => {
+                self.geom_pending = Some((geom, Instant::now()));
+                ctx.request_repaint_after(Duration::from_millis(1100));
+            }
+        }
+    }
+
     fn settings_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("⚙", |ui| {
             let kind = self.update.kind.clone().unwrap_or(updater::InstallKind::Unmanaged);
             ui.label(RichText::new(format!("Taskd {}", updater::current_version())).strong());
             ui.label(RichText::new(updater::describe(&kind)).small().weak());
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Theme:");
+                for (key, label) in [("system", "System"), ("light", "Light"), ("dark", "Dark")] {
+                    if ui.selectable_label(self.cfg.theme == key, label).clicked() {
+                        self.cfg.theme = key.into();
+                        ui.ctx().set_theme(theme_pref(key));
+                    }
+                }
+            });
+            if ui.button("Reset tab order").clicked() {
+                self.cfg.tab_order.clear();
+            }
             ui.separator();
             ui.checkbox(&mut self.cfg.auto_update, "Check for updates at launch").on_hover_text(match kind {
                 updater::InstallKind::Portable(_) => "Updates are downloaded, verified and installed automatically.",
@@ -319,10 +396,42 @@ impl App {
             ui.label(RichText::new("Taskd").strong().size(16.0));
             ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).small().weak());
             ui.add_space(10.0);
-            for (i, t) in Tab::ALL.into_iter().enumerate() {
-                let r = ui.selectable_label(self.tab == t, t.label());
-                if r.on_hover_text(format!("Ctrl+{}", i + 1)).clicked() {
+            let tabs = Tab::ordered(&self.cfg.tab_order);
+            let mut rects = Vec::with_capacity(tabs.len());
+            for (i, t) in tabs.iter().copied().enumerate() {
+                let r = ui.selectable_label(self.tab == t, t.label()).interact(egui::Sense::click_and_drag());
+                rects.push(r.rect);
+                if r.drag_started() {
+                    self.tab_drag = Some(t);
+                }
+                if r.on_hover_text(format!("Ctrl+{} · drag to reorder", i + 1)).clicked() {
                     self.tab = t;
+                }
+            }
+            // Drag-to-reorder tabs: show where it would land, apply on release.
+            if let Some(dragged) = self.tab_drag
+                && let Some(from) = tabs.iter().position(|t| *t == dragged)
+            {
+                let x = ui.input(|i| i.pointer.interact_pos()).map_or(0.0, |p| p.x);
+                let target = rects.iter().filter(|r| r.center().x < x).count();
+                let line_x = if target < rects.len() {
+                    rects[target].left() - 2.0
+                } else {
+                    rects[rects.len() - 1].right() + 2.0
+                };
+                ui.painter().vline(
+                    line_x,
+                    rects[0].y_range(),
+                    egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                );
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                if ui.input(|i| i.pointer.any_released()) {
+                    let mut order = tabs.clone();
+                    let t = order.remove(from);
+                    let to = if target > from { target - 1 } else { target };
+                    order.insert(to.min(order.len()), t);
+                    self.cfg.tab_order = order.iter().map(|t| t.key()).collect::<Vec<_>>().join(",");
+                    self.tab_drag = None;
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -391,10 +500,11 @@ impl App {
         let (tab, pause, refresh) = ctx.input(|i| {
             let mut tab = None;
             if i.modifiers.command {
+                let order = Tab::ordered(&self.cfg.tab_order);
                 for (n, k) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6].into_iter().enumerate()
                 {
                     if i.key_pressed(k) {
-                        tab = Some(Tab::ALL[n]);
+                        tab = order.get(n).copied();
                     }
                 }
             }
@@ -497,10 +607,19 @@ impl eframe::App for App {
         self.elevate_dialog(&ctx);
 
         self.cfg.tab = self.tab.key().into();
+        self.track_geometry(&ctx);
         if self.cfg != self.saved {
             self.cfg.save();
             self.saved = self.cfg.clone();
         }
+    }
+}
+
+fn theme_pref(key: &str) -> egui::ThemePreference {
+    match key {
+        "light" => egui::ThemePreference::Light,
+        "dark" => egui::ThemePreference::Dark,
+        _ => egui::ThemePreference::System,
     }
 }
 

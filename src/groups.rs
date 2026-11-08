@@ -19,6 +19,8 @@ use crate::sampler::{ProcInfo, Snapshot};
 pub enum Kind {
     App,
     Service,
+    Container,
+    Vm,
     Process,
 }
 
@@ -27,6 +29,8 @@ impl Kind {
         match self {
             Kind::App => "App",
             Kind::Service => "Service",
+            Kind::Container => "Container",
+            Kind::Vm => "VM",
             Kind::Process => "Process",
         }
     }
@@ -210,6 +214,74 @@ enum Tag {
     Scope(Arc<str>),
     Desktop(usize),
     Service(Arc<str>),
+    /// Docker/Podman container: full container id.
+    Container(String),
+    /// libvirt/nspawn machine: its name.
+    Vm(String),
+}
+
+/// `docker-<id>.scope` / `libpod-<id>.scope` -> container id.
+fn container_id(unit: &str) -> Option<&str> {
+    let s = unit.strip_suffix(".scope")?;
+    s.strip_prefix("docker-").or_else(|| s.strip_prefix("libpod-")).filter(|id| !id.starts_with("conmon"))
+}
+
+/// `machine-qemu\x2d1\x2dwin11.scope` -> `win11`; `machine-foo.scope` -> `foo`.
+fn machine_name(unit: &str) -> Option<String> {
+    let s = unit.strip_prefix("machine-")?.strip_suffix(".scope")?.replace("\\x2d", "-");
+    // libvirt names scopes qemu-<n>-<name>.
+    let name = match s.strip_prefix("qemu-").and_then(|r| r.split_once('-')) {
+        Some((n, rest)) if n.chars().all(|c| c.is_ascii_digit()) => rest.to_string(),
+        _ => s,
+    };
+    (!name.is_empty()).then_some(name)
+}
+
+/// Container names from `docker ps` / `podman ps`, refreshed in the background (the CLIs take
+/// tens of milliseconds and may hang if a daemon is down, so never on the UI thread).
+#[derive(Default, Clone)]
+pub struct ContainerNames(Arc<std::sync::Mutex<NameCache>>);
+
+#[derive(Default)]
+struct NameCache {
+    names: HashMap<String, String>,
+    refreshed: Option<std::time::Instant>,
+}
+
+impl ContainerNames {
+    fn get(&self, id: &str) -> Option<String> {
+        self.0.lock().ok()?.names.get(id).cloned()
+    }
+
+    /// Kick off a refresh if containers are present and the cache is older than 15 s.
+    fn refresh_if_stale(&self) {
+        let Ok(mut g) = self.0.lock() else { return };
+        if g.refreshed.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(15)) {
+            return;
+        }
+        g.refreshed = Some(std::time::Instant::now());
+        let me = self.clone();
+        std::thread::spawn(move || {
+            let mut names = HashMap::new();
+            for tool in ["docker", "podman"] {
+                let Ok(out) = std::process::Command::new(crate::actions::sys_bin(tool))
+                    .args(["ps", "--no-trunc", "--format", "{{.ID}} {{.Names}}"])
+                    .stderr(std::process::Stdio::null())
+                    .output()
+                else {
+                    continue;
+                };
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    if let Some((id, name)) = line.split_once(' ') {
+                        names.insert(id.to_string(), name.to_string());
+                    }
+                }
+            }
+            if let Ok(mut g) = me.0.lock() {
+                g.names = names;
+            }
+        });
+    }
 }
 
 #[derive(Default)]
@@ -217,6 +289,7 @@ pub struct Grouper {
     index: Option<DesktopIndex>,
     generation: u64,
     pub groups: Vec<Group>,
+    containers: ContainerNames,
 }
 
 impl Grouper {
@@ -225,7 +298,10 @@ impl Grouper {
             return;
         }
         let index = self.index.get_or_insert_with(DesktopIndex::load);
-        self.groups = group(snap, my_uid, index);
+        if snap.procs.iter().any(|p| p.unit.as_deref().is_some_and(|u| container_id(u).is_some())) {
+            self.containers.refresh_if_stale();
+        }
+        self.groups = group(snap, my_uid, index, &self.containers);
         self.generation = snap.generation;
     }
 }
@@ -235,6 +311,12 @@ fn own_tag(p: &ProcInfo, my_uid: u32, index: &DesktopIndex) -> Option<Tag> {
         return None;
     }
     if let Some(u) = &p.unit {
+        if let Some(id) = container_id(u) {
+            return Some(Tag::Container(id.to_string()));
+        }
+        if let Some(name) = machine_name(u) {
+            return Some(Tag::Vm(name));
+        }
         return Some(if u.starts_with("app-") { Tag::Scope(u.clone()) } else { Tag::Service(u.clone()) });
     }
     if p.uid != my_uid {
@@ -248,7 +330,7 @@ fn own_tag(p: &ProcInfo, my_uid: u32, index: &DesktopIndex) -> Option<Tag> {
         .map(Tag::Desktop)
 }
 
-fn group(snap: &Snapshot, my_uid: u32, index: &DesktopIndex) -> Vec<Group> {
+fn group(snap: &Snapshot, my_uid: u32, index: &DesktopIndex, containers: &ContainerNames) -> Vec<Group> {
     let procs = &snap.procs;
     let by_pid: HashMap<u32, usize> = procs.iter().enumerate().map(|(i, p)| (p.pid, i)).collect();
     let own: Vec<Option<Tag>> = procs.iter().map(|p| own_tag(p, my_uid, index)).collect();
@@ -306,6 +388,11 @@ fn group(snap: &Snapshot, my_uid: u32, index: &DesktopIndex) -> Vec<Group> {
                 add(format!("app:{}", e.id), e.name.clone(), Kind::App, i as u32);
             }
             Some(Tag::Scope(u)) => scope_members.entry(u).or_default().push(i as u32),
+            Some(Tag::Container(id)) => {
+                let name = containers.get(&id).unwrap_or_else(|| format!("container {}", &id[..id.len().min(12)]));
+                add(format!("ctr:{id}"), name, Kind::Container, i as u32);
+            }
+            Some(Tag::Vm(name)) => add(format!("vm:{name}"), name, Kind::Vm, i as u32),
             Some(Tag::Service(u)) => {
                 let name = u.trim_end_matches(".service").replace("\\x2d", "-");
                 add(format!("svc:{u}"), name, Kind::Service, i as u32);
@@ -373,11 +460,20 @@ mod tests {
     }
 
     #[test]
+    fn containers_and_vms() {
+        assert_eq!(container_id("docker-ff0c.scope"), Some("ff0c"));
+        assert_eq!(container_id("libpod-abc.scope"), Some("abc"));
+        assert_eq!(container_id("libpod-conmon-abc.scope"), None);
+        assert_eq!(machine_name("machine-qemu\\x2d1\\x2dwin11.scope").as_deref(), Some("win11"));
+        assert_eq!(machine_name("machine-debian.scope").as_deref(), Some("debian"));
+    }
+
+    #[test]
     fn groups_live_system() {
         let mut s = crate::sampler::Sampler::new();
         let snap = s.sample();
         let uid = unsafe { libc::getuid() };
-        let groups = group(&snap, uid, &DesktopIndex::load());
+        let groups = group(&snap, uid, &DesktopIndex::load(), &ContainerNames::default());
         let total: usize = groups.iter().map(|g| g.members.len()).sum();
         assert_eq!(total, snap.procs.len(), "every process belongs to exactly one group");
     }

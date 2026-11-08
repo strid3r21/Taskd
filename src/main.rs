@@ -1,10 +1,12 @@
 mod actions;
 mod app;
 mod config;
+mod files;
 mod gpu;
 mod graph;
 mod groups;
 mod mcp;
+mod power;
 mod sampler;
 mod services;
 mod startup;
@@ -109,11 +111,24 @@ fn once() {
     }
     let mut g = groups::Grouper::default();
     g.update(&snap, unsafe { libc::getuid() });
-    let mut apps: Vec<_> = g.groups.iter().filter(|x| x.kind == groups::Kind::App && x.mine).collect();
+    let mut apps: Vec<_> = g
+        .groups
+        .iter()
+        .filter(|x| {
+            (x.kind == groups::Kind::App && x.mine) || matches!(x.kind, groups::Kind::Container | groups::Kind::Vm)
+        })
+        .collect();
     apps.sort_by_key(|a| std::cmp::Reverse(a.mem));
     println!("{} apps:", apps.len());
     for a in apps {
-        println!("  {:<32} {:>3} procs {:>10} {:>5.1}% cpu", a.name, a.members.len(), util::fmt_bytes(a.mem), a.cpu);
+        println!(
+            "  {:<32} {:<9} {:>3} procs {:>10} {:>5.1}% cpu",
+            a.name,
+            a.kind.label(),
+            a.members.len(),
+            util::fmt_bytes(a.mem),
+            a.cpu
+        );
     }
     let n_svc = g.groups.iter().filter(|x| x.kind == groups::Kind::Service).count();
     println!(

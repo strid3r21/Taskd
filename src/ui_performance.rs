@@ -22,6 +22,7 @@ enum Device {
     Disk(usize),
     Net(usize),
     Gpu(usize),
+    Battery(usize),
 }
 
 #[derive(Default)]
@@ -43,6 +44,13 @@ fn default_title(d: Device, s: &Snapshot) -> String {
         Device::Disk(i) => format!("Disk {i} ({})", s.disks[i].name),
         Device::Net(i) => s.nets[i].name.clone(),
         Device::Gpu(i) => format!("GPU {i}"),
+        Device::Battery(i) => {
+            if s.batteries.len() > 1 {
+                format!("Battery {i}")
+            } else {
+                "Battery".into()
+            }
+        }
     }
 }
 
@@ -91,6 +99,7 @@ fn device_key(d: Device, s: &Snapshot) -> String {
         Device::Disk(i) => format!("disk:{}", s.disks[i].name),
         Device::Net(i) => format!("net:{}", s.nets[i].name),
         Device::Gpu(i) => format!("gpu:{i}"),
+        Device::Battery(i) => format!("bat:{}", s.batteries[i].name),
     }
 }
 
@@ -100,6 +109,7 @@ fn ordered_devices(s: &Snapshot, order: &str) -> Vec<(Device, String)> {
     v.extend((0..s.disks.len()).map(Device::Disk));
     v.extend((0..s.nets.len()).map(Device::Net));
     v.extend((0..s.gpus.len()).map(Device::Gpu));
+    v.extend((0..s.batteries.len()).map(Device::Battery));
     let pos: Vec<&str> = order.split(',').filter(|k| !k.is_empty()).collect();
     let mut keyed: Vec<(Device, String)> = v.into_iter().map(|d| (d, device_key(d, s))).collect();
     keyed.sort_by_key(|(_, k)| pos.iter().position(|p| p == k).unwrap_or(usize::MAX));
@@ -122,6 +132,7 @@ impl PerfState {
             Device::Disk(i) if i >= s.disks.len() => Device::Cpu,
             Device::Net(i) if i >= s.nets.len() => Device::Cpu,
             Device::Gpu(i) if i >= s.gpus.len() => Device::Cpu,
+            Device::Battery(i) if i >= s.batteries.len() => Device::Cpu,
             d => d,
         };
         // Never leave a hidden device selected.
@@ -162,12 +173,29 @@ impl PerfState {
                     Device::Disk(i) => disk_view(ui, &s, i, &window, &title),
                     Device::Net(i) => net_view(ui, &s, i, &window, &title),
                     Device::Gpu(i) => gpu_view(ui, &s, i, &window, &title),
+                    Device::Battery(i) => battery_view(ui, &s, i, &window, &title),
                 }
                 act = match self.sel {
                     Device::Cpu => top_list(ui, groups, &s, Metric::Cpu, CPU),
                     Device::Mem => top_list(ui, groups, &s, Metric::Mem, MEM),
                     Device::Disk(_) => top_list(ui, groups, &s, Metric::Disk, DISK),
                     Device::Gpu(_) => top_list(ui, groups, &s, Metric::Gpu, GPU),
+                    Device::Battery(i) => {
+                        let b = &s.batteries[i];
+                        match b.power_w.filter(|_| b.discharging()) {
+                            // Rough per-app estimate: its share of the busy CPU times the measured draw.
+                            Some(w) if s.cpu.usage > 0.5 => {
+                                top_list(ui, groups, &s, Metric::Power(w as f64 / s.cpu.usage as f64), BATTERY)
+                            }
+                            _ => {
+                                ui.add_space(14.0);
+                                ui.label(
+                                    RichText::new("Per-app power estimates appear while running on battery.").weak(),
+                                );
+                                None
+                            }
+                        }
+                    }
                     Device::Net(_) => {
                         ui.add_space(14.0);
                         ui.label(
@@ -381,6 +409,17 @@ impl PerfState {
                     sub += &format!("  {t:.0}°C");
                 }
                 (format!("GPU {i}"), sub, &g.hist, 100.0, GPU)
+            }
+            Device::Battery(i) => {
+                let b = &s.batteries[i];
+                let mut sub = format!("{:.0}%", b.percent);
+                if let Some(w) = b.power_w {
+                    sub += &format!("  {w:.1} W");
+                }
+                if !b.discharging() {
+                    sub += if b.status == "Charging" { "  ⚡" } else { "  AC" };
+                }
+                ("Battery".into(), sub, &b.hist, 100.0, BATTERY)
             }
         };
         let title = name.to_string(); // nickname or built-in name, from the caller
@@ -629,6 +668,38 @@ enum Metric {
     Mem,
     Gpu,
     Disk,
+    /// Estimated watts: watts per percent of machine CPU.
+    Power(f64),
+}
+
+const BATTERY: Color32 = Color32::from_rgb(0x2f, 0xb8, 0xa8);
+
+fn battery_view(ui: &mut egui::Ui, s: &Snapshot, i: usize, window: &str, title: &str) {
+    let b = &s.batteries[i];
+    header(ui, title, &b.model);
+    let w = ui.available_width();
+    caption(ui, &format!("Charge over {window}"), "100%");
+    graph(ui, Vec2::new(w, (w * 0.3).clamp(120.0, 260.0)), &[Series::new(&b.hist, BATTERY)], 100.0, true);
+    ui.add_space(8.0);
+    let pmax = (b.power_hist.max() * 1.2).max(5.0);
+    caption(ui, "Power draw", &format!("{pmax:.0} W"));
+    graph(ui, Vec2::new(w, (w * 0.15).clamp(70.0, 140.0)), &[Series::new(&b.power_hist, BATTERY)], pmax, true);
+    let hm = |h: f32| format!("{}:{:02}", h as u32, ((h.fract()) * 60.0) as u32);
+    let mut items = vec![("Charge", format!("{:.0}%", b.percent)), ("Status", b.status.clone())];
+    if let Some(p) = b.power_w {
+        items.push(("Power", format!("{p:.1} W")));
+    }
+    if let Some(h) = b.hours_left {
+        items.push((if b.discharging() { "Time left" } else { "Until full" }, hm(h)));
+    }
+    if let Some(h) = b.health {
+        items.push(("Health", format!("{h:.0}% of design")));
+    }
+    if let Some(c) = b.cycles {
+        items.push(("Cycles", c.to_string()));
+    }
+    items.push(("Power source", if b.on_ac { "AC adapter".into() } else { "Battery".into() }));
+    stats(ui, "bat_stats", &items);
 }
 
 /// "Top 10 apps & services" by one resource, below the device graphs.
@@ -645,6 +716,7 @@ fn top_list(ui: &mut egui::Ui, groups: &[Group], snap: &Snapshot, m: Metric, col
             Metric::Mem => g.mem as f64,
             Metric::Gpu => g.gpu as f64,
             Metric::Disk => g.read + g.write,
+            Metric::Power(w_per_pct) => g.cpu as f64 * w_per_pct,
         }
     };
     let fmt = |v: f64| -> String {
@@ -653,6 +725,7 @@ fn top_list(ui: &mut egui::Ui, groups: &[Group], snap: &Snapshot, m: Metric, col
             Metric::Mem => fmt_bytes(v as u64),
             Metric::Gpu => format!("{v:.0}%"),
             Metric::Disk => fmt_rate(v),
+            Metric::Power(_) => format!("~{v:.1} W"),
         }
     };
     let title = match m {
@@ -660,6 +733,7 @@ fn top_list(ui: &mut egui::Ui, groups: &[Group], snap: &Snapshot, m: Metric, col
         Metric::Mem => "Top apps & services by memory",
         Metric::Gpu => "Top apps & services by GPU",
         Metric::Disk => "Top apps & services by disk I/O (all disks)",
+        Metric::Power(_) => "Top apps & services by estimated power (from CPU share)",
     };
     let mut top: Vec<&Group> = groups.iter().filter(|g| val(g) > 0.0).collect();
     top.sort_by(|a, b| val(b).total_cmp(&val(a)));

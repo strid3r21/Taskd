@@ -102,7 +102,7 @@ pub fn elevated_nice_args(pid: u32, nice: i32) -> Vec<String> {
 }
 
 /// Everything shown in the process details window, read on demand.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct Details {
     pub pid: u32,
     pub exe: String,
@@ -113,6 +113,25 @@ pub struct Details {
     pub open_fds: Option<usize>,
     pub env_count: Option<usize>,
     pub limits_open_files: Option<String>,
+    /// Open files and network connections (or why they can't be read).
+    pub files: Result<crate::files::ProcFiles, String>,
+}
+
+impl Default for Details {
+    fn default() -> Self {
+        Details {
+            pid: 0,
+            exe: String::new(),
+            cwd: String::new(),
+            cmdline: String::new(),
+            status: Vec::new(),
+            cgroup: String::new(),
+            open_fds: None,
+            env_count: None,
+            limits_open_files: None,
+            files: Ok(Default::default()),
+        }
+    }
 }
 
 pub fn read_details(pid: u32) -> Details {
@@ -122,7 +141,8 @@ pub fn read_details(pid: u32) -> Details {
             .map(|l| l.to_string_lossy().into_owned())
             .unwrap_or_else(|_| "(access denied)".into())
     };
-    let mut d = Details { pid, exe: link("exe"), cwd: link("cwd"), ..Default::default() };
+    let mut d =
+        Details { pid, exe: link("exe"), cwd: link("cwd"), files: crate::files::read(pid), ..Default::default() };
     if let Ok(b) = std::fs::read(format!("{base}/cmdline")) {
         d.cmdline = String::from_utf8_lossy(&b).trim_end_matches('\0').replace('\0', " ");
     }

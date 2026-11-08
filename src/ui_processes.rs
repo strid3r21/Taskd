@@ -8,7 +8,7 @@ use eframe::egui::{self, Align, Color32, Key, Layout, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
 
 use crate::actions::{self, ActionError, Details, Signal};
-use crate::app::Ctx;
+use crate::app::{Ctx, JobResult};
 use crate::sampler::{ProcInfo, Snapshot};
 use crate::util::{fmt_bytes, fmt_duration, fmt_rate};
 
@@ -18,6 +18,7 @@ pub enum Col {
     Pid,
     User,
     Cpu,
+    Spark,
     Mem,
     Gpu,
     Read,
@@ -26,15 +27,17 @@ pub enum Col {
     Nice,
     State,
     Started,
+    CpuTime,
     Command,
 }
 
 impl Col {
-    pub const ALL: [Col; 13] = [
+    pub const ALL: [Col; 15] = [
         Col::Name,
         Col::Pid,
         Col::User,
         Col::Cpu,
+        Col::Spark,
         Col::Mem,
         Col::Gpu,
         Col::Read,
@@ -43,6 +46,7 @@ impl Col {
         Col::Nice,
         Col::State,
         Col::Started,
+        Col::CpuTime,
         Col::Command,
     ];
     fn key(self) -> &'static str {
@@ -51,6 +55,8 @@ impl Col {
             Col::Pid => "pid",
             Col::User => "user",
             Col::Cpu => "cpu",
+            Col::Spark => "spark",
+            Col::CpuTime => "cputime",
             Col::Mem => "mem",
             Col::Gpu => "gpu",
             Col::Read => "read",
@@ -68,6 +74,8 @@ impl Col {
             Col::Pid => "PID",
             Col::User => "User",
             Col::Cpu => "CPU",
+            Col::Spark => "CPU history",
+            Col::CpuTime => "CPU time",
             Col::Mem => "Memory",
             Col::Gpu => "GPU",
             Col::Read => "Disk read",
@@ -91,6 +99,7 @@ impl Col {
             Col::Command => Column::remainder().at_least(100.0).clip(true),
             Col::User => Column::initial(90.0).at_least(40.0).clip(true),
             Col::Pid | Col::Threads | Col::Nice => Column::initial(64.0).at_least(40.0),
+            Col::Spark => Column::initial(90.0).at_least(40.0),
             Col::State => Column::initial(80.0).at_least(40.0).clip(true),
             _ => Column::initial(86.0).at_least(50.0),
         }
@@ -101,6 +110,9 @@ impl Col {
             Col::Pid => a.pid.cmp(&b.pid),
             Col::User => a.user.cmp(&b.user),
             Col::Cpu => a.cpu.total_cmp(&b.cpu),
+            // Sort the sparkline by recent average load.
+            Col::Spark => spark_avg(a).total_cmp(&spark_avg(b)),
+            Col::CpuTime => a.cpu_time.total_cmp(&b.cpu_time),
             Col::Mem => a.mem.cmp(&b.mem),
             Col::Gpu => a.gpu.total_cmp(&b.gpu),
             Col::Read => a.read_rate.total_cmp(&b.read_rate),
@@ -113,6 +125,79 @@ impl Col {
             Col::Command => a.cmd.cmp(&b.cmd),
         }
         .then(a.pid.cmp(&b.pid))
+    }
+}
+
+/// Open files and connections, as collapsible sections of the details window.
+fn files_section(ui: &mut egui::Ui, d: &Details) {
+    let f = match &d.files {
+        Ok(f) => f,
+        Err(e) => {
+            ui.label(RichText::new(format!("Open files: {e}")).weak());
+            return;
+        }
+    };
+    let more = if f.truncated { "+" } else { "" };
+    egui::CollapsingHeader::new(format!("Network connections ({})", f.conns.len())).id_salt(("conns", d.pid)).show(
+        ui,
+        |ui| {
+            egui::Grid::new(("cg", d.pid)).num_columns(4).striped(true).spacing([12.0, 3.0]).show(ui, |ui| {
+                for c in &f.conns {
+                    ui.label(c.proto);
+                    ui.label(&c.local);
+                    ui.label(if c.remote.is_empty() { "—" } else { &c.remote });
+                    ui.label(RichText::new(c.state).weak());
+                    ui.end_row();
+                }
+            });
+        },
+    );
+    egui::CollapsingHeader::new(format!("Open files ({}{more})", f.files.len())).id_salt(("files", d.pid)).show(
+        ui,
+        |ui| {
+            egui::Grid::new(("fg", d.pid)).num_columns(3).striped(true).spacing([12.0, 3.0]).show(ui, |ui| {
+                for o in &f.files {
+                    ui.label(RichText::new(o.fd.to_string()).weak());
+                    ui.label(o.kind);
+                    ui.add(egui::Label::new(&o.target).wrap());
+                    ui.end_row();
+                }
+            });
+        },
+    );
+}
+
+fn spark_avg(p: &ProcInfo) -> f32 {
+    let n = p.spark_len as usize;
+    if n == 0 { 0.0 } else { p.spark[crate::sampler::SPARK - n..].iter().map(|&v| v as f32).sum::<f32>() / n as f32 }
+}
+
+/// Tiny CPU-history graph (% of one core, 0..100) drawn straight into the table cell.
+fn sparkline(ui: &mut egui::Ui, p: &ProcInfo) {
+    let rect = ui.max_rect().shrink2(egui::vec2(3.0, 3.0));
+    let n = p.spark_len as usize;
+    if n < 2 || !ui.is_rect_visible(rect) {
+        return;
+    }
+    let vals = &p.spark[crate::sampler::SPARK - n..];
+    let step = rect.width() / (crate::sampler::SPARK - 1) as f32;
+    let x0 = rect.right() - step * (n - 1) as f32;
+    let pts: Vec<egui::Pos2> = vals
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| egui::pos2(x0 + step * i as f32, rect.bottom() - rect.height() * v as f32 / 100.0))
+        .collect();
+    let color = crate::graph::CPU;
+    ui.painter().add(egui::Shape::line(pts, egui::Stroke::new(1.2, color)));
+}
+
+/// CPU time as h:mm:ss (or m:ss.s for short-lived work).
+fn fmt_cpu_time(secs: f64) -> String {
+    let s = secs as u64;
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
+    } else {
+        format!("{}:{:04.1}", s / 60, secs % 60.0)
     }
 }
 
@@ -153,6 +238,14 @@ struct OrderKey {
     scope: u64,
 }
 
+/// The "Find open file" window.
+struct FindState {
+    query: String,
+    /// Matches and how many processes couldn't be inspected; `None` until a search finishes.
+    results: Option<(Vec<crate::files::Holder>, usize)>,
+    searching: bool,
+}
+
 /// A filter applied from another tab ("Show in Processes", double-click a user).
 /// It overrides "Only mine" / "Kernel threads" so the picked processes are always visible.
 enum Scope {
@@ -173,6 +266,7 @@ pub struct ProcState {
     key: OrderKey,
     collapsed: HashSet<u32>,
     details: Vec<(Details, u64, bool)>,
+    find: Option<FindState>,
     focus_search: bool,
     scroll_to_selected: bool,
     pending_sort: Option<Col>,
@@ -299,6 +393,7 @@ impl ProcState {
         ui.add_space(2.0);
         self.rebuild_order(&snap, c);
         let act = self.table(ui, &snap, c);
+        self.find_window(ui, &snap, c);
         if let Some(col) = self.pending_sort.take() {
             if c.cfg.sort_col == col.key() {
                 c.cfg.sort_desc = !c.cfg.sort_desc;
@@ -310,6 +405,83 @@ impl ProcState {
         }
         if let Some(a) = act {
             self.apply(a, &snap, c);
+        }
+    }
+
+    pub fn holders_loaded(&mut self, found: Vec<crate::files::Holder>, denied: usize) {
+        if let Some(f) = &mut self.find {
+            f.results = Some((found, denied));
+            f.searching = false;
+        }
+    }
+
+    fn find_window(&mut self, ui: &egui::Ui, snap: &Snapshot, c: &mut Ctx) {
+        let Some(FindState { query, results: res, searching }) = &mut self.find else { return };
+        let (mut open, mut search, mut pick) = (true, false, None);
+        egui::Window::new("Find open file").open(&mut open).default_size([620.0, 380.0]).show(ui.ctx(), |ui| {
+            ui.horizontal(|ui| {
+                let r = ui.add(
+                    egui::TextEdit::singleline(query)
+                        .hint_text("Path or part of it, e.g. /media/usb or .lock")
+                        .desired_width(360.0),
+                );
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                if (ui.add_enabled(!query.trim().is_empty() && !*searching, egui::Button::new("Search")).clicked()
+                    || enter)
+                    && !query.trim().is_empty()
+                {
+                    search = true;
+                }
+                if *searching {
+                    ui.spinner();
+                }
+            });
+            if let Some((found, denied)) = res {
+                ui.label(RichText::new(format!("{} match(es)", found.len())).strong());
+                if *denied > 0 {
+                    ui.label(
+                        RichText::new(format!(
+                            "{denied} processes of other users couldn't be inspected (run as root to include them)."
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                }
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    egui::Grid::new("holders").num_columns(4).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
+                        for h in found.iter() {
+                            if ui
+                                .link(format!("{} ({})", h.name, h.pid))
+                                .on_hover_text("Show in the process list")
+                                .clicked()
+                            {
+                                pick = Some(h.pid);
+                            }
+                            ui.label(RichText::new(format!("fd {}", h.fd)).weak());
+                            ui.label(&h.path);
+                            ui.end_row();
+                        }
+                    });
+                });
+            }
+        });
+        if search {
+            *searching = true;
+            *res = None;
+            let q = query.trim().to_string();
+            c.jobs.spawn(move || {
+                let (found, denied) = crate::files::find_holders(&q);
+                JobResult::FileHolders(found, denied)
+            });
+        }
+        if let Some(pid) = pick {
+            self.clear_scope();
+            self.filter.clear();
+            self.select(pid, snap);
+            self.scroll_to_selected = true;
+        }
+        if !open {
+            self.find = None;
         }
     }
 
@@ -411,6 +583,13 @@ impl ProcState {
                         self.apply(Action::Signal(p.pid, Signal::Term), snap, c);
                     }
                 });
+                if ui
+                    .button("Find open file…")
+                    .on_hover_text("Which process has a file, device or socket open?")
+                    .clicked()
+                {
+                    self.find = Some(FindState { query: String::new(), results: None, searching: false });
+                }
                 ui.menu_button("Columns", |ui| {
                     let mut hidden = Self::hidden_cols(c.cfg);
                     for col in Col::ALL.into_iter().skip(1) {
@@ -557,6 +736,8 @@ impl ProcState {
                                 ui.painter().rect_filled(ui.max_rect(), 0.0, heat(p.gpu / 50.0));
                                 num(ui, format!("{:.0}%", p.gpu));
                             }
+                            Col::Spark => sparkline(ui, p),
+                            Col::CpuTime => num(ui, fmt_cpu_time(p.cpu_time)),
                             Col::Read => num(ui, fmt_rate(p.read_rate)),
                             Col::Write => num(ui, fmt_rate(p.write_rate)),
                             Col::Threads => num(ui, p.threads.to_string()),
@@ -695,6 +876,7 @@ impl ProcState {
                                 }
                             },
                         );
+                        files_section(ui, d);
                     });
                 });
         }

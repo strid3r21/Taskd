@@ -149,7 +149,7 @@ impl Server {
             json!({
                 "name": "top_consumers",
                 "title": "Top resource consumers",
-                "description": "The apps, services or processes using the most of a resource. group_by='app' (default) groups processes into applications and systemd services; 'process' lists individual processes.",
+                "description": "The apps, services, containers, VMs or processes using the most of a resource. group_by='app' (default) groups processes into applications, systemd services, Docker/Podman containers and VMs; 'process' lists individual processes.",
                 "inputSchema": {"type": "object", "properties": {
                     "resource": {"type": "string", "enum": ["cpu", "memory", "gpu", "disk_io"]},
                     "group_by": {"type": "string", "enum": ["app", "process"], "default": "app"},
@@ -359,6 +359,11 @@ impl Server {
                 "index": i, "name": g.name, "usage_percent": g.util.map(round1),
                 "memory_used": g.mem_used.map(fmt_bytes), "memory_total": g.mem_total.map(fmt_bytes),
                 "temperature_c": g.temp_c.map(round1), "power_w": g.power_w.map(round1),
+            })).collect::<Vec<_>>(),
+            "batteries": s.batteries.iter().map(|b| json!({
+                "name": b.name, "percent": round1(b.percent), "status": b.status,
+                "power_w": b.power_w.map(round1), "hours_left": b.hours_left.map(round1),
+                "health_percent": b.health.map(round1), "on_ac": b.on_ac,
             })).collect::<Vec<_>>(),
             "processes": s.procs.len(),
             "threads": s.threads,

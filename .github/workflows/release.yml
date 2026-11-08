@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,14 +18,16 @@ env:
   CARGO_ZIGBUILD_VERSION: 0.24.1
 
 jobs:
-  release:
+  build:
+    # Built on our own Unraid runner. It never sees the signing key or a write token:
+    # signing and publishing happen in the separate job below.
     runs-on: [self-hosted, linux, unraid]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Check tag matches Cargo.toml version
         if: startsWith(github.ref, 'refs/tags/v')
@@ -74,11 +76,50 @@ jobs:
           (cd dist && sha256sum ./*.tar.gz ./*.deb > SHA256SUMS)
           ls -la dist
 
-      - uses: softprops/action-gh-release@v3
-        if: startsWith(github.ref, 'refs/tags/v')
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/SHA256SUMS
+          retention-days: 7
+
+  publish:
+    # Signs SHA256SUMS and publishes the release. Runs on a fresh GitHub-hosted VM so the
+    # signing key and the write token never touch the persistent self-hosted runner.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Sign SHA256SUMS
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          [ -n "$RELEASE_SIGNING_KEY" ] || { echo "::error::RELEASE_SIGNING_KEY is not set; refusing to publish an unsigned release"; exit 1; }
+          umask 077
+          key="$RUNNER_TEMP/signing.pem"
+          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$key"
+          openssl pkeyutl -sign -inkey "$key" -rawin -in dist/SHA256SUMS -out dist/SHA256SUMS.sig
+          rm -f "$key"
+          # The key must match the public key built into the app, or updates would be rejected.
+          openssl pkeyutl -verify -pubin -inkey packaging/release-key.pem -rawin -in dist/SHA256SUMS -sigfile dist/SHA256SUMS.sig
+          (cd dist && sha256sum -c SHA256SUMS)
+
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           generate_release_notes: true
           files: |
             dist/*.tar.gz
             dist/*.deb
             dist/SHA256SUMS
+            dist/SHA256SUMS.sig

@@ -14,6 +14,9 @@ install -Dm755 "${TASKD_BIN:-target/release/taskdm}" "$ROOT/usr/bin/taskdm"
 install -Dm644 packaging/taskd-monitor.desktop "$ROOT/usr/share/applications/taskd-monitor.desktop"
 install -Dm644 packaging/taskd-monitor.svg "$ROOT/usr/share/icons/hicolor/scalable/apps/taskd-monitor.svg"
 install -Dm644 LICENSE "$ROOT/usr/share/doc/taskd-monitor/copyright"
+install -Dm755 packaging/install-update "$ROOT/usr/libexec/taskd-monitor/install-update"
+install -Dm644 packaging/io.github.strid3r21.taskd.policy "$ROOT/usr/share/polkit-1/actions/io.github.strid3r21.taskd.policy"
+install -Dm644 packaging/release-key.pem "$ROOT/usr/share/taskd-monitor/release-key.pem"
 SIZE="$(du -sk "$ROOT/usr" | cut -f1)"
 
 mkdir -p "$ROOT/DEBIAN"
@@ -24,8 +27,8 @@ Section: admin
 Priority: optional
 Architecture: $ARCH
 Installed-Size: $SIZE
-Depends: libc6 (>= 2.31), libgl1
-Recommends: policykit-1 | pkexec
+Depends: libc6 (>= 2.31), libgl1, openssl
+Recommends: pkexec | policykit-1
 Maintainer: strid3r21 <strid3r21@users.noreply.github.com>
 Description: Fast, lightweight task manager for Linux
  Processes, performance graphs (CPU, memory, disk, network, GPU),

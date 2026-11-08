@@ -1,0 +1,31 @@
+#!/bin/sh
+# Taskd .deb updater, run as root through pkexec (polkit action io.github.strid3r21.taskd.install-update).
+#
+#   install-update <package.deb> <SHA256SUMS> <SHA256SUMS.sig>
+#
+# Everything is copied into a root-only directory first and verified *there*, so nothing the
+# calling user controls can be swapped in between the checks and dpkg:
+#   1. SHA256SUMS must carry a valid signature from the Taskd release key (installed by this package);
+#   2. the .deb must match its entry in SHA256SUMS;
+#   3. it must be a taskd-monitor package.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+[ "$#" -eq 3 ] || { echo "usage: install-update <deb> <SHA256SUMS> <SHA256SUMS.sig>" >&2; exit 2; }
+key=/usr/share/taskd-monitor/release-key.pem
+name=$(basename -- "$1")
+case "$name" in taskd-monitor_*_*.deb) ;; *) echo "not a Taskd package: $name" >&2; exit 3 ;; esac
+
+tmp=$(mktemp -d /var/tmp/taskd-update.XXXXXX)
+trap 'rm -rf "$tmp"' EXIT
+cp -- "$1" "$tmp/$name"
+cp -- "$2" "$tmp/SHA256SUMS"
+cp -- "$3" "$tmp/SHA256SUMS.sig"
+
+openssl pkeyutl -verify -pubin -inkey "$key" -rawin -in "$tmp/SHA256SUMS" -sigfile "$tmp/SHA256SUMS.sig" >/dev/null \
+    || { echo "SHA256SUMS signature is not valid" >&2; exit 4; }
+expected=$(awk -v n="$name" '{f=$2; sub(/^\*?(\.\/)?/, "", f)} f == n {print $1; exit}' "$tmp/SHA256SUMS")
+[ -n "$expected" ] || { echo "$name is not listed in SHA256SUMS" >&2; exit 5; }
+echo "$expected  $tmp/$name" | sha256sum -c --quiet - || { echo "checksum mismatch" >&2; exit 6; }
+[ "$(dpkg-deb -f "$tmp/$name" Package)" = taskd-monitor ] || { echo "not a taskd-monitor package" >&2; exit 3; }
+
+dpkg -i "$tmp/$name"

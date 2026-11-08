@@ -9,7 +9,7 @@ use egui_extras::{Column, TableBuilder};
 
 use crate::actions::{self, ActionError, Details, Signal};
 use crate::app::Ctx;
-use crate::sampler::{ProcInfo, Snapshot, now_epoch};
+use crate::sampler::{ProcInfo, Snapshot};
 use crate::util::{fmt_bytes, fmt_duration, fmt_rate};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -166,6 +166,8 @@ enum Scope {
 pub struct ProcState {
     pub filter: String,
     selected: Option<u32>,
+    /// Start time of the selected process, so a reused pid never inherits the selection.
+    selected_start: Option<f64>,
     /// (index into snapshot.procs, tree depth, has children)
     order: Vec<(u32, u16, bool)>,
     key: OrderKey,
@@ -225,6 +227,11 @@ impl ProcState {
             })
             .collect();
 
+        // Forget collapsed state of processes that are gone (their pid may be reused).
+        if self.collapsed.len() > 64 || snap.generation % 30 == 0 {
+            let live: HashSet<u32> = procs.iter().map(|p| p.pid).collect();
+            self.collapsed.retain(|pid| live.contains(pid));
+        }
         self.order.clear();
         if key.tree && needle.is_empty() {
             let set: HashMap<u32, u32> = visible.iter().map(|&i| (procs[i as usize].pid, i)).collect();
@@ -272,6 +279,7 @@ impl ProcState {
     /// Show only `pids` (an app or service picked on another tab) and select its first process.
     pub fn show_group(&mut self, label: String, pids: HashSet<u32>) {
         self.selected = pids.iter().min().copied();
+        self.selected_start = None;
         self.scroll_to_selected = true;
         self.filter.clear();
         self.scope = Some(Scope::Group(label, pids));
@@ -305,9 +313,20 @@ impl ProcState {
         }
     }
 
+    fn select(&mut self, pid: u32, snap: &Snapshot) {
+        self.selected = Some(pid);
+        self.selected_start = snap.procs.iter().find(|p| p.pid == pid).map(|p| p.start);
+    }
+
+    /// The selected process, but only if it is still the same process *and* visible:
+    /// Delete / End task must never hit a row the user can't see.
     fn selected_proc<'a>(&self, snap: &'a Snapshot) -> Option<&'a ProcInfo> {
         let pid = self.selected?;
-        snap.procs.iter().find(|p| p.pid == pid)
+        let p = snap.procs.iter().find(|p| p.pid == pid)?;
+        if self.selected_start.is_some_and(|s| (s - p.start).abs() > 0.02) {
+            return None;
+        }
+        self.order.iter().any(|&(i, ..)| snap.procs[i as usize].pid == pid).then_some(p)
     }
 
     fn keyboard(&mut self, ui: &egui::Ui, snap: &Snapshot, c: &mut Ctx) {
@@ -332,7 +351,7 @@ impl ProcState {
             let sig = if shift { Signal::Kill } else { Signal::Term };
             self.apply(Action::Signal(p.pid, sig), snap, c);
         }
-        if enter && let Some(pid) = self.selected {
+        if enter && let Some(pid) = self.selected_proc(snap).map(|p| p.pid) {
             self.apply(Action::Details(pid), snap, c);
         }
         if up || down {
@@ -344,7 +363,7 @@ impl ProcState {
                 (Some(p), false) => (p + 1).min(self.order.len().saturating_sub(1)),
             };
             if let Some(&(i, ..)) = self.order.get(next) {
-                self.selected = Some(snap.procs[i as usize].pid);
+                self.select(snap.procs[i as usize].pid, snap);
                 self.scroll_to_selected = true;
             }
         }
@@ -431,7 +450,8 @@ impl ProcState {
         let ncpu = snap.cpu.logical.max(1) as f32;
         let cpu_mult = if c.cfg.per_core_percent { ncpu } else { 1.0 };
         let total_mem = snap.mem.total.max(1) as f32;
-        let now_since_boot = now_epoch().saturating_sub(snap.boot_time) as f64;
+        // Process start times are on the boot clock: compare with uptime, not wall time.
+        let now_since_boot = snap.uptime;
         let dark = ui.visuals().dark_mode;
         let heat = |v: f32| -> Color32 {
             let a = (v.clamp(0.0, 1.0) * 0.85 + if v > 0.0 { 0.06 } else { 0.0 }).min(0.9);
@@ -484,7 +504,9 @@ impl ProcState {
             body.rows(row_h, self.order.len(), |mut row| {
                 let (idx, depth, has_kids) = self.order[row.index()];
                 let p = &snap.procs[idx as usize];
-                row.set_selected(self.selected == Some(p.pid));
+                row.set_selected(
+                    self.selected == Some(p.pid) && self.selected_start.is_none_or(|s| (s - p.start).abs() <= 0.02),
+                );
                 for &col in &cols {
                     row.col(|ui| {
                         let num = |ui: &mut egui::Ui, s: String| {
@@ -571,7 +593,7 @@ impl ProcState {
 
     fn apply(&mut self, a: Action, snap: &Snapshot, c: &mut Ctx) {
         match a {
-            Action::Select(pid) => self.selected = Some(pid),
+            Action::Select(pid) => self.select(pid, snap),
             Action::Toggle(pid) => {
                 if !self.collapsed.remove(&pid) {
                     self.collapsed.insert(pid);

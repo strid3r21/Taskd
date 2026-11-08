@@ -20,7 +20,7 @@ Then start **Taskd** from your app menu, or run `taskdm`.
 
 > The package is named `taskd-monitor` and the command is `taskdm`, because Debian and Ubuntu already have an unrelated `taskd` package.
 
-Taskd keeps itself up to date. Tarball installs update automatically at launch. `.deb` installs show an **Update & restart** banner, which asks for your password. You can turn this off in the ⚙ menu.
+Taskd keeps itself up to date. Tarball installs update automatically at launch. `.deb` installs show an **Update & restart** banner, which asks for your password. Updates are **signed**: Taskd only installs a release whose checksums carry a valid signature from the project's release key. You can turn update checks off in the ⚙ menu.
 
 ## What's inside
 
@@ -28,9 +28,9 @@ Taskd keeps itself up to date. Tarball installs update automatically at launch. 
 | --- | --- |
 | **Apps** | See running apps with their processes grouped together. End, kill, suspend or resume a whole app. |
 | **Processes** | See every process with CPU, memory, GPU, disk, threads and state. Filter, sort, use tree view, change priority, send signals, open details. |
-| **Performance** | Live graphs for CPU (per core too), memory, each disk, network interface and GPU, plus the top 10 apps and services using each one. Drag the sidebar to resize or reorder it. |
+| **Performance** | Live graphs for CPU (per core too), memory, each disk, network interface and GPU, plus the top 10 apps and services using each one. Drag the sidebar to resize or reorder it; right-click an item to rename or hide it. |
 | **Users** | Resource use per user. Double-click a user to see their processes. |
-| **Services** | Start, stop, restart, enable and disable systemd services. |
+| **Services** | Right-click a systemd service to start, stop, restart, reload, pause/resume, enable or disable it, or see its processes and logs. |
 | **Startup** | Turn apps that launch at login on or off. |
 
 **Keyboard:** `Ctrl+1`–`6` switch tabs · `Ctrl+F` search · `Delete` / `Shift+Delete` end / kill · `Enter` details · `Ctrl+P` pause · `F5` refresh

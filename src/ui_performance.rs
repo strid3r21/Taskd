@@ -6,6 +6,7 @@ use std::collections::HashSet;
 
 use crate::actions::Signal;
 use crate::app::{Ctx, Tab};
+use crate::config::Config;
 use crate::graph::{self, CPU, DISK, GPU, MEM, NET, Series, graph};
 use crate::groups::Group;
 use crate::sampler::{History, Snapshot};
@@ -28,6 +29,42 @@ pub struct PerfState {
     sel: Device,
     /// Key of the sidebar item being dragged to a new position.
     drag: Option<String>,
+    /// Rename dialog: (device key, text being edited, default name).
+    renaming: Option<(String, String, String)>,
+    /// Whether the "hidden items" drawer at the bottom of the sidebar is open.
+    show_hidden: bool,
+}
+
+/// The built-in name of a device ("CPU", "Disk 0 (nvme0n1)", …).
+fn default_title(d: Device, s: &Snapshot) -> String {
+    match d {
+        Device::Cpu => "CPU".into(),
+        Device::Mem => "Memory".into(),
+        Device::Disk(i) => format!("Disk {i} ({})", s.disks[i].name),
+        Device::Net(i) => s.nets[i].name.clone(),
+        Device::Gpu(i) => format!("GPU {i}"),
+    }
+}
+
+/// Nicknames are stored as `key=name;key=name`; names escape '%' and ';'.
+fn parse_names(s: &str) -> std::collections::HashMap<String, String> {
+    s.split(';')
+        .filter_map(|e| e.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.replace("%3B", ";").replace("%25", "%")))
+        .collect()
+}
+
+fn encode_names(m: &std::collections::HashMap<String, String>) -> String {
+    let mut v: Vec<String> = m
+        .iter()
+        .map(|(k, n)| format!("{k}={}", n.replace('%', "%25").replace(';', "%3B").replace('\n', " ")))
+        .collect();
+    v.sort();
+    v.join(";")
+}
+
+fn hidden_set(s: &str) -> Vec<String> {
+    s.split(',').filter(|k| !k.is_empty()).map(String::from).collect()
 }
 
 /// Round a throughput ceiling up to a "nice" value so graphs don't jitter.
@@ -87,16 +124,27 @@ impl PerfState {
             Device::Gpu(i) if i >= s.gpus.len() => Device::Cpu,
             d => d,
         };
+        // Never leave a hidden device selected.
+        let hidden = hidden_set(&c.cfg.perf_hidden);
+        if hidden.contains(&device_key(self.sel, &s))
+            && let Some((d, _)) = ordered_devices(&s, &c.cfg.perf_order).into_iter().find(|(_, k)| !hidden.contains(k))
+        {
+            self.sel = d;
+        }
         let panel = egui::Panel::left("perf_list")
             .resizable(true)
             .default_size(c.cfg.perf_sidebar)
             .size_range(170.0..=420.0)
             .show(ui, |ui| {
+                if !hidden.is_empty() {
+                    egui::Panel::bottom("perf_hidden").show(ui, |ui| self.hidden_drawer(ui, &s, c.cfg));
+                }
                 // Don't shrink to the content, or the panel collapses to it and ignores its size.
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| self.sidebar(ui, &s, &mut c.cfg.perf_order));
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.sidebar(ui, &s, c.cfg));
             });
+        self.rename_dialog(ui.ctx(), c.cfg);
+        let names = parse_names(&c.cfg.perf_names);
+        let title = names.get(&device_key(self.sel, &s)).cloned().unwrap_or_else(|| default_title(self.sel, &s));
         // Remember the width once the user lets go (not on every frame of the drag).
         let w = panel.response.rect.width().round();
         if !ui.input(|i| i.pointer.any_down()) && (w - c.cfg.perf_sidebar).abs() >= 1.0 {
@@ -109,11 +157,11 @@ impl PerfState {
         egui::CentralPanel::default_margins().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 match self.sel {
-                    Device::Cpu => cpu_view(ui, &s, c, &window),
-                    Device::Mem => mem_view(ui, &s, &window),
-                    Device::Disk(i) => disk_view(ui, &s, i, &window),
-                    Device::Net(i) => net_view(ui, &s, i, &window),
-                    Device::Gpu(i) => gpu_view(ui, &s, i, &window),
+                    Device::Cpu => cpu_view(ui, &s, c, &window, &title),
+                    Device::Mem => mem_view(ui, &s, &window, &title),
+                    Device::Disk(i) => disk_view(ui, &s, i, &window, &title),
+                    Device::Net(i) => net_view(ui, &s, i, &window, &title),
+                    Device::Gpu(i) => gpu_view(ui, &s, i, &window, &title),
                 }
                 act = match self.sel {
                     Device::Cpu => top_list(ui, groups, &s, Metric::Cpu, CPU),
@@ -144,12 +192,17 @@ impl PerfState {
         }
     }
 
-    fn sidebar(&mut self, ui: &mut egui::Ui, s: &Snapshot, order: &mut String) {
-        let devices = ordered_devices(s, order);
+    fn sidebar(&mut self, ui: &mut egui::Ui, s: &Snapshot, cfg: &mut Config) {
+        let hidden = hidden_set(&cfg.perf_hidden);
+        let names = parse_names(&cfg.perf_names);
+        // Hidden items keep their place in the order, so un-hiding puts them back where they were.
+        let all = ordered_devices(s, &cfg.perf_order);
+        let devices: Vec<(Device, String)> = all.iter().filter(|(_, k)| !hidden.contains(k)).cloned().collect();
         let mut rects = Vec::with_capacity(devices.len());
-        let mut reset = false;
+        let (mut reset, mut hide, mut rename) = (false, None, None);
         for (dev, key) in &devices {
-            let r = self.item(ui, *dev, s);
+            let title = names.get(key).cloned().unwrap_or_else(|| default_title(*dev, s));
+            let r = self.item(ui, *dev, s, &title);
             rects.push(r.rect);
             if r.clicked() {
                 self.sel = *dev;
@@ -157,7 +210,18 @@ impl PerfState {
             if r.drag_started() {
                 self.drag = Some(key.clone());
             }
-            r.on_hover_text("Drag to reorder").context_menu(|ui| {
+            r.on_hover_text("Drag to reorder · right-click to rename or hide").context_menu(|ui| {
+                ui.label(RichText::new(&title).strong());
+                ui.separator();
+                if ui.button("Rename…").clicked() {
+                    rename = Some((key.clone(), title.clone(), default_title(*dev, s)));
+                    ui.close();
+                }
+                if ui.add_enabled(devices.len() > 1, egui::Button::new("Hide")).clicked() {
+                    hide = Some(key.clone());
+                    ui.close();
+                }
+                ui.separator();
                 if ui.button("Reset order").clicked() {
                     reset = true;
                     ui.close();
@@ -165,7 +229,18 @@ impl PerfState {
             });
         }
         if reset {
-            order.clear();
+            cfg.perf_order.clear();
+        }
+        if let Some(k) = hide {
+            let mut h = hidden.clone();
+            h.push(k);
+            cfg.perf_hidden = h.join(",");
+        }
+        if rename.is_some() {
+            self.renaming = rename;
+        }
+        if devices.is_empty() {
+            return;
         }
 
         // Drag-to-reorder: draw where the item would land, move it on release.
@@ -182,15 +257,97 @@ impl PerfState {
         ui.painter().hline(x, line_y, egui::Stroke::new(2.0, ui.visuals().selection.stroke.color));
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         if ui.input(|i| i.pointer.any_released()) {
-            let keys: Vec<String> = devices.into_iter().map(|(_, k)| k).collect();
-            *order = move_item(keys, from, target).join(",");
+            // Reorder the visible items, then re-insert hidden ones at their old positions.
+            let visible: Vec<String> = devices.into_iter().map(|(_, k)| k).collect();
+            let mut moved = move_item(visible, from, target).into_iter();
+            let merged: Vec<String> =
+                all.into_iter().map(|(_, k)| if hidden.contains(&k) { k } else { moved.next().unwrap_or(k) }).collect();
+            cfg.perf_order = merged.join(",");
             self.drag = None;
         }
     }
 
+    /// Bottom drawer listing hidden items, each with a button to show it again.
+    fn hidden_drawer(&mut self, ui: &mut egui::Ui, s: &Snapshot, cfg: &mut Config) {
+        let hidden = hidden_set(&cfg.perf_hidden);
+        let names = parse_names(&cfg.perf_names);
+        let devices: Vec<(Device, String)> =
+            ordered_devices(s, &cfg.perf_order).into_iter().filter(|(_, k)| hidden.contains(k)).collect();
+        ui.add_space(2.0);
+        let arrow = if self.show_hidden { "⏷" } else { "⏶" };
+        let label = format!("{arrow}  Show hidden ({})", hidden.len());
+        if ui.add_sized([ui.available_width(), 22.0], egui::Button::new(label)).clicked() {
+            self.show_hidden = !self.show_hidden;
+        }
+        let mut unhide = None;
+        if self.show_hidden {
+            for (dev, key) in &devices {
+                ui.horizontal(|ui| {
+                    let title = names.get(key).cloned().unwrap_or_else(|| default_title(*dev, s));
+                    ui.add(egui::Label::new(title).truncate());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Show").clicked() {
+                            unhide = Some(key.clone());
+                        }
+                    });
+                });
+            }
+            // Devices that are hidden but not present right now (e.g. an unplugged disk).
+            let absent = hidden.iter().filter(|k| !devices.iter().any(|(_, d)| d == *k)).count();
+            if absent > 0 && ui.small_button(format!("Forget {absent} disconnected")).clicked() {
+                let present: Vec<String> =
+                    hidden.iter().filter(|k| devices.iter().any(|(_, d)| d == *k)).cloned().collect();
+                cfg.perf_hidden = present.join(",");
+            }
+        }
+        if let Some(k) = unhide {
+            cfg.perf_hidden = hidden.into_iter().filter(|h| *h != k).collect::<Vec<_>>().join(",");
+        }
+        ui.add_space(2.0);
+    }
+
+    fn rename_dialog(&mut self, ctx: &egui::Context, cfg: &mut Config) {
+        let Some((key, text, default)) = &mut self.renaming else { return };
+        let (mut save, mut close) = (None, false);
+        egui::Window::new("Rename")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!("Nickname for {default}:"));
+                let r = ui.add(egui::TextEdit::singleline(text).desired_width(260.0));
+                r.request_focus();
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() || enter {
+                        save = Some(text.trim().to_string());
+                    }
+                    if ui.button("Use default").clicked() {
+                        save = Some(String::new());
+                    }
+                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        close = true;
+                    }
+                });
+            });
+        if let Some(name) = save {
+            let mut names = parse_names(&cfg.perf_names);
+            if name.is_empty() || name == *default {
+                names.remove(key.as_str());
+            } else {
+                names.insert(key.clone(), name);
+            }
+            cfg.perf_names = encode_names(&names);
+            close = true;
+        }
+        if close {
+            self.renaming = None;
+        }
+    }
+
     /// One sidebar entry: sparkline + name + current value. Clickable and draggable.
-    fn item(&self, ui: &mut egui::Ui, dev: Device, s: &Snapshot) -> egui::Response {
-        let (title, sub, hist, max, col): (String, String, &History, f32, Color32) = match dev {
+    fn item(&self, ui: &mut egui::Ui, dev: Device, s: &Snapshot, name: &str) -> egui::Response {
+        let (_built_in, sub, hist, max, col): (String, String, &History, f32, Color32) = match dev {
             Device::Cpu => {
                 let cpu = &s.cpu;
                 let mut sub = format!("{:.0}%", cpu.usage);
@@ -226,6 +383,7 @@ impl PerfState {
                 (format!("GPU {i}"), sub, &g.hist, 100.0, GPU)
             }
         };
+        let title = name.to_string(); // nickname or built-in name, from the caller
         let selected = self.sel == dev;
         let frame = egui::Frame::new().inner_margin(6.0).corner_radius(4.0).fill(if selected {
             col.gamma_multiply(0.15)
@@ -291,9 +449,9 @@ fn window_label(interval_ms: u64) -> String {
     if secs >= 120 && secs % 60 == 0 { format!("{} minutes", secs / 60) } else { format!("{secs} seconds") }
 }
 
-fn cpu_view(ui: &mut egui::Ui, s: &Snapshot, c: &mut Ctx, window: &str) {
+fn cpu_view(ui: &mut egui::Ui, s: &Snapshot, c: &mut Ctx, window: &str, title: &str) {
     let cpu = &s.cpu;
-    header(ui, "CPU", &cpu.model);
+    header(ui, title, &cpu.model);
     ui.horizontal(|ui| {
         ui.label("Graph:");
         ui.selectable_value(&mut c.cfg.cpu_per_core_graphs, false, "Overall");
@@ -345,20 +503,23 @@ fn cpu_view(ui: &mut egui::Ui, s: &Snapshot, c: &mut Ctx, window: &str) {
     stats(ui, "cpu_stats", &items);
 }
 
-fn mem_view(ui: &mut egui::Ui, s: &Snapshot, window: &str) {
+fn mem_view(ui: &mut egui::Ui, s: &Snapshot, window: &str, title: &str) {
     let m = &s.mem;
-    header(ui, "Memory", &format!("{} total", fmt_bytes(m.total)));
+    header(ui, title, &format!("{} total", fmt_bytes(m.total)));
     caption(ui, &format!("Memory usage over {}", window), &fmt_bytes(m.total));
     let w = ui.available_width();
     let h = (w * 0.34).clamp(140.0, 300.0);
     graph(ui, Vec2::new(w, h), &[Series::new(&m.hist, MEM)], 100.0, true);
     ui.add_space(8.0);
     caption(ui, "Memory composition", "");
-    let free = m.total.saturating_sub(m.used + m.cached + m.buffers);
+    // "Used" already includes shared memory and non-reclaimable cache, so cap the cache part
+    // at what's left; otherwise the bar overflows and "Free" bottoms out at zero.
+    let cache = (m.cached + m.buffers).min(m.total.saturating_sub(m.used));
+    let free = m.total.saturating_sub(m.used + cache);
     graph::bar(
         ui,
         w,
-        &[(m.used as f32, MEM.gamma_multiply(0.85)), ((m.cached + m.buffers) as f32, MEM.gamma_multiply(0.35))],
+        &[(m.used as f32, MEM.gamma_multiply(0.85)), (cache as f32, MEM.gamma_multiply(0.35))],
         m.total as f32,
         MEM,
     );
@@ -383,9 +544,9 @@ fn mem_view(ui: &mut egui::Ui, s: &Snapshot, window: &str) {
     );
 }
 
-fn disk_view(ui: &mut egui::Ui, s: &Snapshot, i: usize, window: &str) {
+fn disk_view(ui: &mut egui::Ui, s: &Snapshot, i: usize, window: &str, title: &str) {
     let d = &s.disks[i];
-    header(ui, &format!("Disk {i} ({})", d.name), &d.model);
+    header(ui, title, &format!("{}  /dev/{}", d.model, d.name));
     let w = ui.available_width();
     caption(ui, &format!("Active time over {}", window), "100%");
     graph(ui, Vec2::new(w, (w * 0.25).clamp(110.0, 220.0)), &[Series::new(&d.busy_hist, DISK)], 100.0, true);
@@ -413,10 +574,10 @@ fn disk_view(ui: &mut egui::Ui, s: &Snapshot, i: usize, window: &str) {
     );
 }
 
-fn net_view(ui: &mut egui::Ui, s: &Snapshot, i: usize, window: &str) {
+fn net_view(ui: &mut egui::Ui, s: &Snapshot, i: usize, window: &str, title: &str) {
     let n = &s.nets[i];
     let link = n.speed_mbps.map_or(String::new(), |m| format!("Link speed {m} Mbps"));
-    header(ui, &n.name, &link);
+    header(ui, title, &link);
     let w = ui.available_width();
     let max = nice_max(n.rx_hist.max().max(n.tx_hist.max()));
     caption(ui, &format!("Throughput over {} (solid: receive, dashed: send)", window), &fmt_bits(max as f64));
@@ -439,9 +600,9 @@ fn net_view(ui: &mut egui::Ui, s: &Snapshot, i: usize, window: &str) {
     );
 }
 
-fn gpu_view(ui: &mut egui::Ui, s: &Snapshot, i: usize, window: &str) {
+fn gpu_view(ui: &mut egui::Ui, s: &Snapshot, i: usize, window: &str, title: &str) {
     let g = &s.gpus[i];
-    header(ui, &format!("GPU {i}"), &g.name);
+    header(ui, title, &g.name);
     let w = ui.available_width();
     caption(ui, &format!("Utilization over {}", window), "100%");
     graph(ui, Vec2::new(w, (w * 0.4).clamp(150.0, 340.0)), &[Series::new(&g.hist, GPU)], 100.0, true);
@@ -611,6 +772,15 @@ mod tests {
         assert_eq!(move_item(k.clone(), 1, 3), keys(&["cpu", "disk:a", "mem", "gpu:0"]));
         assert_eq!(move_item(k.clone(), 2, 2), k);
         assert_eq!(move_item(k.clone(), 2, 3), k);
+    }
+
+    #[test]
+    fn nicknames_round_trip() {
+        let mut m = std::collections::HashMap::new();
+        m.insert("cpu".to_string(), "Ryzen; 100% fast".to_string());
+        m.insert("disk:nvme0n1".to_string(), "Games".to_string());
+        assert_eq!(parse_names(&encode_names(&m)), m);
+        assert!(parse_names("").is_empty());
     }
 
     #[test]

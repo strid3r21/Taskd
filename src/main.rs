@@ -36,6 +36,11 @@ OPTIONS:
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(args.first().map(String::as_str), Some("--bench" | "--once")) {
+        // Text output may be piped into `head`: exit quietly on a closed pipe instead of panicking.
+        // SAFETY: restoring the default disposition of SIGPIPE before any threads start.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    }
     match args.first().map(String::as_str) {
         Some("-h" | "--help") => print!("{HELP}"),
         Some("-V" | "--version") => println!("taskdm {}", env!("CARGO_PKG_VERSION")),
@@ -58,6 +63,7 @@ fn main() {
 }
 
 fn bench(n: usize) {
+    let n = n.max(1);
     let t = Instant::now();
     let mut s = sampler::Sampler::new();
     let init = t.elapsed();

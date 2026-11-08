@@ -276,20 +276,22 @@ impl AppsState {
 pub fn signal_many(c: &mut Ctx, what: &str, pids: &[u32], sig: Signal) {
     let mut denied = Vec::new();
     let mut other = None;
+    let mut sent = 0;
     for &pid in pids {
         match actions::send_signal(pid, sig) {
-            Ok(()) => {}
+            Ok(()) => sent += 1,
             Err(ActionError::Permission) => denied.push(pid),
             Err(ActionError::Other(e)) => other = Some(e),
         }
     }
     if !denied.is_empty() {
-        let mut args = vec!["kill".to_string(), "-s".into(), sig.name().into()];
+        let mut args = vec![actions::sys_bin("kill"), "-s".into(), sig.name().into()];
         args.extend(denied.iter().map(|p| p.to_string()));
         *c.elevate = Some((format!("{} {what}", sig.verb().to_lowercase()), args));
-    } else if let Some(e) = other.filter(|_| pids.len() == 1) {
-        c.error(format!("Couldn't {} {what}: {e}", sig.verb().to_lowercase()));
+    } else if sent == 0 {
+        let why = other.unwrap_or_else(|| "no processes left".into());
+        c.error(format!("Couldn't {} {what}: {why}", sig.verb().to_lowercase()));
     } else {
-        c.info(format!("{} {what}: sent SIG{} to {} process(es)", sig.verb(), sig.name(), pids.len()));
+        c.info(format!("{} {what}: sent SIG{} to {sent} process(es)", sig.verb(), sig.name()));
     }
 }

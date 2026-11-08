@@ -9,7 +9,7 @@ use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, Thread};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crate::gpu::{GpuInfo, GpuReader};
 use crate::util::{
@@ -155,6 +155,8 @@ struct ProcEntry {
     cmd: Arc<str>,
     user: Arc<str>,
     uid: u32,
+    /// Raw `comm` as last seen: a change means the process exec()'d into another program.
+    comm: Box<[u8]>,
     io_ok: bool,
     seen: u64,
     /// Number of samples this process has been seen in.
@@ -234,8 +236,13 @@ impl Sampler {
         if let Some(bt) = read_into("/proc/stat", &mut s.buf).ok().and_then(|_| kv_u64(&s.buf, b"btime ")) {
             s.snap.boot_time = bt;
         }
-        // Prime the deltas so the first published snapshot has meaningful rates.
+        // Prime the deltas, then drop what that pass pushed into the histories: its "rates"
+        // are averages since boot (CPU) or zero, not real recent samples.
         s.sample();
+        s.snap.cpu.hist = History::default();
+        s.snap.cpu.core_hist.iter_mut().for_each(|h| *h = History::default());
+        s.snap.mem.hist = History::default();
+        s.snap.mem.swap_hist = History::default();
         s
     }
 
@@ -257,7 +264,12 @@ impl Sampler {
                 _ => {}
             }
         }
-        let logical = thread::available_parallelism().map_or(1, |n| n.get());
+        // Online CPUs of the machine. Not available_parallelism(): that follows this process's
+        // affinity/cgroup quota (e.g. under taskset) and would skew every per-core figure.
+        let logical = std::fs::read_to_string("/sys/devices/system/cpu/online")
+            .ok()
+            .and_then(|s| count_cpu_list(s.trim()))
+            .unwrap_or_else(|| thread::available_parallelism().map_or(1, |n| n.get()));
         self.snap.cpu.physical = if cores.is_empty() { logical } else { cores.len() };
         self.snap.cpu.logical = logical;
         for i in 0..1024 {
@@ -358,8 +370,9 @@ impl Sampler {
             return 0;
         }
         let mut total_delta = 0;
-        let mut core = 0usize;
+        let mut seen_cores = 0usize;
         let cpu = &mut self.snap.cpu;
+        let mut online = vec![false; cpu.per_core.len()];
         for line in self.buf.split(|&c| c == b'\n') {
             if line.starts_with(b"cpu") {
                 let mut it = fields(line);
@@ -368,7 +381,13 @@ impl Sampler {
                 for (slot, f) in v.iter_mut().zip(it) {
                     *slot = parse_u64(f).unwrap_or(0);
                 }
-                let idx = if label == b"cpu" { 0 } else { core + 1 };
+                // Key per-core data by the CPU *number* (cpu7 -> 7): offline CPUs are missing
+                // from /proc/stat, so position would mislabel every core after a gap.
+                let core = if label == b"cpu" { None } else { parse_u64(&label[3..]).map(|n| n as usize) };
+                if label != b"cpu" && core.is_none() {
+                    continue;
+                }
+                let idx = core.map_or(0, |c| c + 1);
                 if self.prev_cpu.len() <= idx {
                     self.prev_cpu.resize(idx + 1, [0; 8]);
                 }
@@ -386,14 +405,16 @@ impl Sampler {
                     cpu.system = pct(d[2] + d[5] + d[6]);
                     cpu.iowait = pct(d[4]);
                     cpu.hist.push(usage);
-                } else {
+                } else if let Some(core) = core {
                     if cpu.per_core.len() <= core {
                         cpu.per_core.resize(core + 1, 0.0);
                         cpu.core_hist.resize(core + 1, History::default());
+                        online.resize(core + 1, false);
                     }
                     cpu.per_core[core] = usage;
                     cpu.core_hist[core].push(usage);
-                    core += 1;
+                    online[core] = true;
+                    seen_cores += 1;
                 }
             } else if let Some(rest) = line.strip_prefix(b"ctxt ") {
                 let c = parse_u64(rest).unwrap_or(0);
@@ -404,6 +425,19 @@ impl Sampler {
             } else if let Some(rest) = line.strip_prefix(b"procs_running ") {
                 self.snap.running = parse_u64(rest).unwrap_or(0);
             }
+        }
+        // CPUs that went offline: show them idle instead of frozen at their last value.
+        for (i, on) in online.iter().enumerate() {
+            if !on {
+                self.snap.cpu.per_core[i] = 0.0;
+                self.snap.cpu.core_hist[i].push(0.0);
+                if let Some(p) = self.prev_cpu.get_mut(i + 1) {
+                    *p = [0; 8]; // its counters restart when it comes back
+                }
+            }
+        }
+        if seen_cores > 0 {
+            self.snap.cpu.logical = seen_cores;
         }
 
         if !self.freq_files.is_empty() {
@@ -556,10 +590,28 @@ impl Sampler {
             let Some(st) = parse_stat(&self.buf) else { continue };
             let kernel = st.ppid == 2 || pid == 2;
 
-            if self.procs.get(&pid).is_none_or(|e| e.start != st.start) {
+            // 0 = known and unchanged, 1 = same process exec()'d into a new program, 2 = new.
+            let status = match self.procs.get(&pid) {
+                Some(e) if e.start == st.start => u8::from(*e.comm != self.buf[st.comm.clone()]),
+                _ => 2,
+            };
+            if status != 0 {
                 let comm = String::from_utf8_lossy(&self.buf[st.comm.clone()]).into_owned();
-                let e = self.new_entry(pid, comm, st.start, kernel);
-                self.procs.insert(pid, e);
+                let mut fresh = self.new_entry(pid, comm, st.start, kernel);
+                if status == 1
+                    && let Some(old) = self.procs.remove(&pid)
+                {
+                    // Keep the counters so rates stay continuous; io access is re-probed
+                    // because the owner may have changed (setuid programs).
+                    fresh.cpu = old.cpu;
+                    fresh.rd = old.rd;
+                    fresh.wr = old.wr;
+                    fresh.seen = old.seen;
+                    fresh.age = old.age;
+                    fresh.stat_fd = old.stat_fd;
+                    fresh.statm_fd = old.statm_fd;
+                }
+                self.procs.insert(pid, fresh);
             }
             let entry = self.procs.get_mut(&pid).unwrap();
             if new_fd.is_some() {
@@ -661,6 +713,7 @@ impl Sampler {
                 cmd = String::from_utf8_lossy(raw).replace('\0', " ");
             }
         }
+        let comm_raw: Box<[u8]> = comm.as_bytes().into();
         let name = display_name(&comm, &cmd);
         let unit = if kernel { None } else { read_unit(pid, &mut self.path, &mut self.buf) };
         ProcEntry {
@@ -672,6 +725,7 @@ impl Sampler {
             cmd: if cmd.is_empty() { self.empty.clone() } else { Arc::from(cmd) },
             user,
             uid,
+            comm: comm_raw,
             io_ok: !kernel,
             seen: 0,
             age: 0,
@@ -705,6 +759,21 @@ pub fn unit_from_cgroup(text: &str) -> Option<&str> {
         (c.starts_with("app-") && c.ends_with(".scope"))
             || (c.ends_with(".service") && !c.starts_with("user@") && !c.starts_with("user-runtime-dir@"))
     })
+}
+
+/// Count CPUs in a kernel CPU list like "0-11,16,18-23".
+fn count_cpu_list(s: &str) -> Option<usize> {
+    let mut n = 0;
+    for part in s.split(',').filter(|p| !p.is_empty()) {
+        n += match part.split_once('-') {
+            Some((a, b)) => b.parse::<usize>().ok()?.checked_sub(a.parse::<usize>().ok()?)? + 1,
+            None => {
+                part.parse::<usize>().ok()?;
+                1
+            }
+        };
+    }
+    (n > 0).then_some(n)
 }
 
 /// Read `/proc/<pid>/<name>` through `slot`'s cached fd, opening (and caching) it if needed.
@@ -837,10 +906,6 @@ fn find_cpu_temp() -> Option<String> {
     None
 }
 
-pub fn now_epoch() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
-}
-
 /// State shared between the sampler thread and the UI.
 pub struct Shared {
     latest: Mutex<Arc<Snapshot>>,
@@ -864,6 +929,9 @@ impl Shared {
 /// Spawn the sampler thread. `on_sample` is called after each publish (used to request a repaint).
 pub fn spawn(interval_ms: u64, on_sample: impl Fn() + Send + 'static) -> Arc<Shared> {
     let mut sampler = Sampler::new();
+    // Let the first published sample cover a real interval; a few-ms window quantises
+    // per-core usage to 0/100% and makes rates spike (which then sets graph scales).
+    thread::sleep(Duration::from_millis(250));
     let first = sampler.sample();
     let shared = Arc::new(Shared {
         latest: Mutex::new(first),
@@ -918,6 +986,30 @@ mod tests {
         assert_eq!(s.threads, 7);
         assert_eq!(s.start, 98765);
         assert_eq!(s.rss_pages, 256);
+    }
+
+    #[test]
+    fn cpu_lists() {
+        assert_eq!(count_cpu_list("0-23"), Some(24));
+        assert_eq!(count_cpu_list("0-11,16,18-23"), Some(19));
+        assert_eq!(count_cpu_list("0"), Some(1));
+        assert_eq!(count_cpu_list(""), None);
+    }
+
+    #[test]
+    fn exec_refreshes_identity() {
+        let mut s = Sampler::new();
+        // A shell that sleeps briefly, then exec()s into a different program (same pid/start).
+        let mut child = std::process::Command::new("sh").args(["-c", "sleep 0.3; exec sleep 5"]).spawn().unwrap();
+        let pid = child.id();
+        s.sample();
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        let snap = s.sample();
+        let p = snap.procs.iter().find(|p| p.pid == pid).expect("child visible");
+        assert_eq!(&*p.name, "sleep", "name refreshed after exec");
+        assert!(p.cmd.starts_with("sleep 5"), "{}", p.cmd);
+        child.kill().ok();
+        child.wait().ok();
     }
 
     #[test]

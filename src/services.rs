@@ -72,8 +72,31 @@ pub fn control(user: bool, verb: &str, unit: &str) -> Result<(), String> {
     if user {
         cmd.arg("--user");
     }
-    let out = cmd.args([verb, unit]).output().map_err(|e| format!("systemctl: {e}"))?;
+    let out = cmd.args([verb, "--", unit]).output().map_err(|e| format!("systemctl: {e}"))?;
     if out.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&out.stderr).trim().to_string()) }
+}
+
+/// Recent journal lines of a unit (newest last).
+pub fn logs(user: bool, unit: &str, lines: u32) -> Result<String, String> {
+    let mut cmd = Command::new(crate::actions::sys_bin("journalctl"));
+    if user {
+        cmd.arg("--user");
+    }
+    let out = cmd
+        // One `--unit=NAME` argument: a name can't be mistaken for an option.
+        .args(["-n", &lines.to_string(), "--no-pager", "-o", "short-iso", &format!("--unit={unit}")])
+        .output()
+        .map_err(|e| format!("journalctl: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    if text.trim().is_empty() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if err.is_empty() {
+            "no log entries (you may need to be in the adm or systemd-journal group)".into()
+        } else {
+            err
+        });
+    }
+    Ok(text)
 }
 
 #[cfg(test)]

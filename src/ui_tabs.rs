@@ -127,9 +127,77 @@ pub struct ServicesState {
     selected: Option<String>,
     only_running: bool,
     reload: bool,
+    /// Log window: (unit, text or error, still loading).
+    logs: Option<(String, Result<String, String>, bool)>,
 }
 
+/// Right-click actions on a service: (systemctl verb, menu label, hover help).
+const SERVICE_ACTIONS: &[(&str, &str, &str)] = &[
+    ("start", "Start", "Start the service"),
+    ("stop", "Stop", "Stop the service"),
+    ("restart", "Restart", "Stop and start it again"),
+    ("reload", "Reload", "Ask it to reload its configuration (not every service supports this)"),
+    ("freeze", "Pause", "Suspend all of the service's processes (systemctl freeze)"),
+    ("thaw", "Resume", "Resume a paused service (systemctl thaw)"),
+    ("enable", "Enable at boot", "Start automatically at boot/login"),
+    ("disable", "Disable at boot", "Don't start automatically"),
+];
+
 impl ServicesState {
+    pub fn logs_loaded(&mut self, unit: String, res: Result<String, String>) {
+        if self.logs.as_ref().is_some_and(|(u, ..)| *u == unit) {
+            self.logs = Some((unit, res, false));
+        }
+    }
+
+    fn control(&mut self, c: &mut Ctx, unit: &str, verb: &'static str, label: &str) {
+        let (unit, user) = (unit.to_string(), self.user);
+        c.info(format!("{label} {unit}…"));
+        c.jobs.spawn(move || match services::control(user, verb, &unit) {
+            Ok(()) => JobResult::Status(format!("{verb} {unit}: done"), false),
+            Err(e) => JobResult::Status(format!("{verb} {unit} failed: {e}"), true),
+        });
+        self.reload = true;
+    }
+
+    fn show_logs(&mut self, c: &Ctx, unit: &str) {
+        let (u, user) = (unit.to_string(), self.user);
+        self.logs = Some((u.clone(), Ok(String::new()), true));
+        c.jobs.spawn(move || {
+            let r = services::logs(user, &u, 300);
+            JobResult::ServiceLogs(u, r)
+        });
+    }
+
+    fn logs_window(&mut self, ctx: &egui::Context) {
+        let Some((unit, res, loading)) = &self.logs else { return };
+        let mut open = true;
+        egui::Window::new(format!("Logs: {unit}"))
+            .id(egui::Id::new("service_logs"))
+            .open(&mut open)
+            .default_size([760.0, 440.0])
+            .resizable(true)
+            .show(ctx, |ui| {
+                if *loading {
+                    ui.spinner();
+                    return;
+                }
+                match res {
+                    Ok(text) => {
+                        egui::ScrollArea::both().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
+                            ui.add(egui::Label::new(RichText::new(text).monospace().size(12.0)).extend());
+                        });
+                    }
+                    Err(e) => {
+                        ui.colored_label(ui.visuals().error_fg_color, e);
+                    }
+                }
+            });
+        if !open {
+            self.logs = None;
+        }
+    }
+
     pub fn request_reload(&mut self) {
         self.reload = true;
     }
@@ -156,7 +224,7 @@ impl ServicesState {
         c.jobs.spawn(move || JobResult::Services(user, services::list(user)));
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, c: &mut Ctx) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, c: &mut Ctx, procs: &mut ProcState) {
         if !self.loading && (self.reload || self.loaded_for != Some(self.user)) {
             self.load(c);
         }
@@ -181,20 +249,13 @@ impl ServicesState {
                     ("stop", "Stop"),
                     ("start", "Start"),
                 ] {
-                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked()
+                    if ui
+                        .add_enabled(enabled, egui::Button::new(label))
+                        .on_hover_text("More actions: right-click a service")
+                        .clicked()
                         && let Some(s) = &sel
                     {
-                        let (unit, user) = (s.unit.clone(), self.user);
-                        let verb = verb.to_string();
-                        c.info(format!("{label} {unit}…"));
-                        c.jobs.spawn(move || {
-                            let r = services::control(user, &verb, &unit);
-                            match r {
-                                Ok(()) => JobResult::Status(format!("{verb} {unit}: done"), false),
-                                Err(e) => JobResult::Status(format!("{verb} {unit} failed: {e}"), true),
-                            }
-                        });
-                        self.reload = true;
+                        self.control(c, &s.unit.clone(), verb, label);
                     }
                 }
             });
@@ -214,6 +275,12 @@ impl ServicesState {
             })
             .collect();
         let mut clicked = None;
+        enum Menu {
+            Control(String, &'static str, &'static str),
+            Processes(String),
+            Logs(String),
+        }
+        let mut menu: Option<Menu> = None;
         let green =
             if ui.visuals().dark_mode { Color32::from_rgb(110, 200, 120) } else { Color32::from_rgb(30, 130, 50) };
         let red = ui.visuals().error_fg_color;
@@ -256,14 +323,54 @@ impl ServicesState {
                     row.col(|ui| {
                         ui.add(egui::Label::new(RichText::new(&s.description).weak()).selectable(false).truncate());
                     });
-                    if row.response().clicked() {
+                    let r = row.response();
+                    if r.clicked() || r.secondary_clicked() {
                         clicked = Some(s.unit.clone());
                     }
+                    r.context_menu(|ui| {
+                        ui.label(RichText::new(s.unit.trim_end_matches(".service")).strong());
+                        ui.label(RichText::new(format!("{} · {}", s.sub, s.enabled)).small().weak());
+                        ui.separator();
+                        for (i, (verb, label, help)) in SERVICE_ACTIONS.iter().enumerate() {
+                            if i == 4 || i == 6 {
+                                ui.separator();
+                            }
+                            if ui.button(*label).on_hover_text(*help).clicked() {
+                                menu = Some(Menu::Control(s.unit.clone(), verb, label));
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Show processes").clicked() {
+                            menu = Some(Menu::Processes(s.unit.clone()));
+                            ui.close();
+                        }
+                        if ui.button("Show logs").clicked() {
+                            menu = Some(Menu::Logs(s.unit.clone()));
+                            ui.close();
+                        }
+                    });
                 });
             });
         if clicked.is_some() {
             self.selected = clicked;
         }
+        match menu {
+            Some(Menu::Control(unit, verb, label)) => self.control(c, &unit, verb, label),
+            Some(Menu::Logs(unit)) => self.show_logs(c, &unit),
+            Some(Menu::Processes(unit)) => {
+                let pids: std::collections::HashSet<u32> =
+                    c.snap.procs.iter().filter(|p| p.unit.as_deref() == Some(unit.as_str())).map(|p| p.pid).collect();
+                if pids.is_empty() {
+                    c.info(format!("{unit} has no running processes"));
+                } else {
+                    procs.show_group(unit.trim_end_matches(".service").to_string(), pids);
+                    *c.switch_to = Some(Tab::Processes);
+                }
+            }
+            None => {}
+        }
+        self.logs_window(ui.ctx());
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "taskd-monitor"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "A fast, lightweight task manager for Linux"
 license = "MIT"
@@ -12,6 +12,7 @@ name = "taskdm"
 path = "src/main.rs"
 
 [dependencies]
+ed25519-compact = { version = "2.6.1", default-features = false }
 # glow (OpenGL) backend only: no wgpu, no persistence/serde, no accesskit.
 eframe = { version = "0.36", default-features = false, features = [
     "glow",

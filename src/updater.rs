@@ -16,6 +16,24 @@ use std::process::{Command, Stdio};
 pub const REPO: &str = "strid3r21/Taskd";
 const ASSET_PREFIX: &str = "taskd-monitor";
 
+/// Ed25519 public key that release `SHA256SUMS` files are signed with (see release.yml).
+/// The matching private key lives only in the RELEASE_SIGNING_KEY repository secret
+/// and the owner's offline backup. The same key ships as packaging/release-key.pem.
+const RELEASE_PUBLIC_KEY: [u8; 32] = [
+    0x3d, 0xda, 0xbd, 0x23, 0xf0, 0x1c, 0x41, 0xbf, 0xc0, 0x4d, 0xf8, 0xa7, 0xd1, 0xda, 0xb9, 0x9f, 0x18, 0x7c, 0x95,
+    0x61, 0xef, 0x6f, 0xdf, 0x64, 0xb8, 0xf9, 0x24, 0xef, 0x04, 0xba, 0x8c, 0x0b,
+];
+
+/// Root-owned helper shipped in the .deb: verifies the signature again as root and runs dpkg.
+const DEB_INSTALL_HELPER: &str = "/usr/libexec/taskd-monitor/install-update";
+
+/// Check `sums` (the release's SHA256SUMS) against its detached Ed25519 signature.
+pub fn verify_signature(sums: &[u8], sig: &[u8]) -> Result<(), String> {
+    let pk = ed25519_compact::PublicKey::from_slice(&RELEASE_PUBLIC_KEY).map_err(|_| "bad built-in key")?;
+    let sig = ed25519_compact::Signature::from_slice(sig).map_err(|_| "malformed signature")?;
+    pk.verify(sums, &sig).map_err(|_| "signature does not match: refusing this update".to_string())
+}
+
 #[derive(Clone, Debug)]
 pub struct Release {
     pub version: String,
@@ -23,6 +41,7 @@ pub struct Release {
     deb: Option<String>,
     tarball: Option<String>,
     sums: Option<String>,
+    sums_sig: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -83,7 +102,7 @@ pub fn install_kind() -> InstallKind {
 }
 
 fn curl(args: &[&str]) -> Result<Vec<u8>, String> {
-    let out = Command::new("curl")
+    let out = Command::new(crate::actions::sys_bin("curl"))
         .args(["-fsSL", "--proto", "=https", "--max-time", "120", "--retry", "2"])
         .args(args)
         .output()
@@ -116,6 +135,7 @@ pub fn check() -> Result<Option<Release>, String> {
         deb: None,
         tarball: None,
         sums: None,
+        sums_sig: None,
     };
     for a in json["assets"].as_array().into_iter().flatten() {
         let (Some(name), Some(url)) = (a["name"].as_str(), a["browser_download_url"].as_str()) else { continue };
@@ -125,6 +145,8 @@ pub fn check() -> Result<Option<Release>, String> {
             rel.tarball = Some(url.to_string());
         } else if name == "SHA256SUMS" {
             rel.sums = Some(url.to_string());
+        } else if name == "SHA256SUMS.sig" {
+            rel.sums_sig = Some(url.to_string());
         }
     }
     Ok(Some(rel))
@@ -140,11 +162,19 @@ fn cache_dir(version: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// Download `url` into `dir` and check it against the release's SHA256SUMS.
+/// Download `url` into `dir` and check it against the release's SHA256SUMS, whose
+/// signature must verify against the built-in release key. Unsigned releases are refused.
+/// Also saves SHA256SUMS and its signature into `dir` (the .deb helper re-checks them as root).
 fn fetch_verified(rel: &Release, url: &str, dir: &Path) -> Result<PathBuf, String> {
     let name = url.rsplit('/').next().ok_or("bad asset url")?;
     let sums_url = rel.sums.as_deref().ok_or("release has no SHA256SUMS")?;
-    let sums = String::from_utf8(curl(&[sums_url])?).map_err(|_| "bad SHA256SUMS")?;
+    let sig_url = rel.sums_sig.as_deref().ok_or("release isn't signed: refusing to install it")?;
+    let sums_raw = curl(&[sums_url])?;
+    let sig = curl(&[sig_url])?;
+    verify_signature(&sums_raw, &sig)?;
+    std::fs::write(dir.join("SHA256SUMS"), &sums_raw).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("SHA256SUMS.sig"), &sig).map_err(|e| e.to_string())?;
+    let sums = String::from_utf8(sums_raw).map_err(|_| "bad SHA256SUMS")?;
     let expected = sums
         .lines()
         .find_map(|l| {
@@ -155,7 +185,10 @@ fn fetch_verified(rel: &Release, url: &str, dir: &Path) -> Result<PathBuf, Strin
 
     let path = dir.join(name);
     curl(&["-o", &path.to_string_lossy(), url])?;
-    let out = Command::new("sha256sum").arg(&path).output().map_err(|e| format!("sha256sum: {e}"))?;
+    let out = Command::new(crate::actions::sys_bin("sha256sum"))
+        .arg(&path)
+        .output()
+        .map_err(|e| format!("sha256sum: {e}"))?;
     let actual = String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap_or("").to_lowercase();
     if actual != expected {
         let _ = std::fs::remove_file(&path);
@@ -171,7 +204,7 @@ pub fn install(rel: &Release, kind: &InstallKind) -> Result<PathBuf, String> {
         InstallKind::Portable(exe) => {
             let url = rel.tarball.as_deref().ok_or("release has no tarball")?;
             let tarball = fetch_verified(rel, url, &dir)?;
-            let status = Command::new("tar")
+            let status = Command::new(crate::actions::sys_bin("tar"))
                 .arg("xzf")
                 .arg(&tarball)
                 .arg("-C")
@@ -198,13 +231,23 @@ pub fn install(rel: &Release, kind: &InstallKind) -> Result<PathBuf, String> {
         InstallKind::Deb => {
             let url = rel.deb.as_deref().ok_or("release has no .deb")?;
             let deb = fetch_verified(rel, url, &dir)?;
-            let out =
-                Command::new("pkexec").arg("dpkg").arg("-i").arg(&deb).output().map_err(|e| format!("pkexec: {e}"))?;
+            if !Path::new(DEB_INSTALL_HELPER).exists() {
+                return Err("this install is missing Taskd's update helper; install the new .deb manually once".into());
+            }
+            // The helper copies the files somewhere only root can write, re-verifies the
+            // signature and checksum there, checks it's a taskd-monitor package, then runs dpkg.
+            let out = Command::new(crate::actions::sys_bin("pkexec"))
+                .arg(DEB_INSTALL_HELPER)
+                .arg(&deb)
+                .arg(dir.join("SHA256SUMS"))
+                .arg(dir.join("SHA256SUMS.sig"))
+                .output()
+                .map_err(|e| format!("pkexec: {e}"))?;
             if !out.status.success() {
                 // 126/127: the user dismissed the password prompt.
                 return Err(match out.status.code() {
                     Some(126 | 127) => "update cancelled".into(),
-                    _ => format!("dpkg failed: {}", String::from_utf8_lossy(&out.stderr).trim()),
+                    _ => format!("install failed: {}", String::from_utf8_lossy(&out.stderr).trim()),
                 });
             }
             let _ = std::fs::remove_dir_all(&dir);
@@ -224,7 +267,8 @@ pub fn just_updated_to(version: &str) -> bool {
 }
 
 /// Start the freshly installed binary (detached) and exit this process.
-pub fn restart(exe: &Path, version: &str) -> ! {
+/// Returns only if the new binary couldn't be started (then this instance keeps running).
+pub fn restart(exe: &Path, version: &str) -> String {
     use std::os::unix::process::CommandExt;
     let mut cmd = Command::new(exe);
     cmd.env(JUST_UPDATED_ENV, version);
@@ -236,8 +280,10 @@ pub fn restart(exe: &Path, version: &str) -> ! {
             Ok(())
         });
     }
-    let _ = cmd.spawn();
-    std::process::exit(0);
+    match cmd.spawn() {
+        Ok(_) => std::process::exit(0),
+        Err(e) => format!("updated, but couldn't start {}: {e}. Restart Taskd manually.", exe.display()),
+    }
 }
 
 /// `taskdm --update`: check and install from the command line.
@@ -290,6 +336,13 @@ mod tests {
         assert!(!is_newer("v0.1.1", "0.2.0"));
         assert!(!is_newer("v0.3.0-beta.1", "0.2.0"));
         assert!(!is_newer("garbage", "0.2.0"));
+    }
+
+    #[test]
+    fn signatures() {
+        // A signature made with the release key over a known message (see packaging/release-key.pem).
+        assert!(verify_signature(b"tampered", &[0u8; 64]).is_err());
+        assert!(verify_signature(b"x", &[1u8; 10]).is_err());
     }
 
     #[test]

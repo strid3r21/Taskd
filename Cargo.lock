@@ -436,6 +436,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ed25519-compact"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9547879431a90e352a35863a54416d92898a787b9af09e6ae2e09a96bd78be80"
+
+[[package]]
 name = "eframe"
 version = "0.36.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2139,8 +2145,9 @@ dependencies = [
 
 [[package]]
 name = "taskd-monitor"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
+ "ed25519-compact",
  "eframe",
  "egui_extras",
  "libc",

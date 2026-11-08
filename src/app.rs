@@ -61,6 +61,7 @@ impl Tab {
 pub enum JobResult {
     Status(String, bool),
     Services(bool, Result<Vec<Service>, String>),
+    ServiceLogs(String, Result<String, String>),
     Startup(Vec<StartupEntry>),
     /// Result of an update check; `bool` = started by the user (report "up to date"/errors).
     UpdateCheck(Result<Option<updater::Release>, String>, bool),
@@ -199,11 +200,14 @@ impl App {
             match r {
                 JobResult::Status(m, err) => self.status = Some((m, err, Instant::now())),
                 JobResult::Services(user, res) => self.services.loaded(user, res),
+                JobResult::ServiceLogs(unit, res) => self.services.logs_loaded(unit, res),
                 JobResult::Startup(list) => self.startup.loaded(list),
                 JobResult::UpdateCheck(res, manual) => self.update_checked(res, manual),
                 JobResult::UpdateInstalled(Ok(exe), version) => {
                     // Settings are saved on every change, so it's safe to hand over right away.
-                    updater::restart(&exe, &version);
+                    let err = updater::restart(&exe, &version);
+                    self.update.installing = false;
+                    self.status = Some((err, true, Instant::now()));
                 }
                 JobResult::UpdateInstalled(Err(e), _) => {
                     self.update.installing = false;
@@ -482,7 +486,7 @@ impl eframe::App for App {
                 Tab::Processes => self.procs.ui(ui, &mut c),
                 Tab::Performance => self.perf.ui(ui, &mut c, &mut self.procs),
                 Tab::Users => self.users.ui(ui, &mut c, &mut self.procs),
-                Tab::Services => self.services.ui(ui, &mut c),
+                Tab::Services => self.services.ui(ui, &mut c, &mut self.procs),
                 Tab::Startup => self.startup.ui(ui, &mut c),
             }
         });

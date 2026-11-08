@@ -18,6 +18,10 @@ pub struct Config {
     /// Performance sidebar width and device order (comma-separated device keys).
     pub perf_sidebar: f32,
     pub perf_order: String,
+    /// Nicknames: `key=name;key=name` (names percent-escape '%' and ';').
+    pub perf_names: String,
+    /// Hidden sidebar items: comma-separated device keys.
+    pub perf_hidden: String,
 }
 
 impl Default for Config {
@@ -36,6 +40,8 @@ impl Default for Config {
             auto_update: true,
             perf_sidebar: 230.0,
             perf_order: String::new(),
+            perf_names: String::new(),
+            perf_hidden: String::new(),
         }
     }
 }
@@ -69,6 +75,8 @@ impl Config {
                 "auto_update" => c.auto_update = b,
                 "perf_sidebar" => c.perf_sidebar = v.parse().unwrap_or(230.0f32).clamp(170.0, 420.0),
                 "perf_order" => c.perf_order = v.into(),
+                "perf_names" => c.perf_names = v.into(),
+                "perf_hidden" => c.perf_hidden = v.into(),
                 _ => {}
             }
         }
@@ -82,7 +90,7 @@ impl Config {
         }
         let text = format!(
             "interval_ms={}\ntab={}\nsort_col={}\nsort_desc={}\ntree={}\nshow_kernel={}\nonly_mine={}\n\
-             per_core_percent={}\ncpu_per_core_graphs={}\nhidden_cols={}\nauto_update={}\nperf_sidebar={}\nperf_order={}\n",
+             per_core_percent={}\ncpu_per_core_graphs={}\nhidden_cols={}\nauto_update={}\nperf_sidebar={}\nperf_order={}\nperf_names={}\nperf_hidden={}\n",
             self.interval_ms,
             self.tab,
             self.sort_col,
@@ -95,7 +103,9 @@ impl Config {
             self.hidden_cols,
             self.auto_update,
             self.perf_sidebar,
-            self.perf_order
+            self.perf_order,
+            self.perf_names,
+            self.perf_hidden
         );
         let _ = std::fs::write(p, text);
     }

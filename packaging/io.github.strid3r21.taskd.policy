@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Taskd</vendor>
+  <vendor_url>https://github.com/strid3r21/Taskd</vendor_url>
+  <icon_name>taskd-monitor</icon_name>
+  <action id="io.github.strid3r21.taskd.install-update">
+    <description>Install a Taskd update</description>
+    <message>Authentication is required to install a Taskd update</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/taskd-monitor/install-update</annotate>
+  </action>
+</policyconfig>

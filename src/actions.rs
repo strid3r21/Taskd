@@ -73,8 +73,18 @@ fn last_error() -> ActionError {
 }
 
 /// Run a command through pkexec (polkit prompt). Blocking: call from a worker thread.
+/// Absolute path of a system tool, so a planted program earlier in $PATH (say ~/.local/bin/kill)
+/// is never what pkexec runs as root.
+pub fn sys_bin(name: &str) -> String {
+    ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        .iter()
+        .map(|d| format!("{d}/{name}"))
+        .find(|p| std::path::Path::new(p).exists())
+        .unwrap_or_else(|| name.to_string())
+}
+
 pub fn run_elevated(args: &[String]) -> Result<(), String> {
-    let out = Command::new("pkexec").args(args).output().map_err(|e| format!("pkexec: {e}"))?;
+    let out = Command::new(sys_bin("pkexec")).args(args).output().map_err(|e| format!("pkexec: {e}"))?;
     if out.status.success() {
         Ok(())
     } else {
@@ -84,11 +94,11 @@ pub fn run_elevated(args: &[String]) -> Result<(), String> {
 }
 
 pub fn elevated_signal_args(pid: u32, sig: Signal) -> Vec<String> {
-    vec!["kill".into(), "-s".into(), sig.name().into(), pid.to_string()]
+    vec![sys_bin("kill"), "-s".into(), sig.name().into(), pid.to_string()]
 }
 
 pub fn elevated_nice_args(pid: u32, nice: i32) -> Vec<String> {
-    vec!["renice".into(), "-n".into(), nice.to_string(), "-p".into(), pid.to_string()]
+    vec![sys_bin("renice"), "-n".into(), nice.to_string(), "-p".into(), pid.to_string()]
 }
 
 /// Everything shown in the process details window, read on demand.

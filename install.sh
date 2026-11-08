@@ -32,6 +32,7 @@ main() {
 
     dir=$(mktemp -d)
     trap 'rm -rf "$dir"' EXIT
+    trap 'exit 1' HUP INT PIPE TERM # dash skips the EXIT trap when a signal kills it
     fetch SHA256SUMS "$dir/SHA256SUMS"
     fetch SHA256SUMS.sig "$dir/SHA256SUMS.sig"
 

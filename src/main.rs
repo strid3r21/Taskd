@@ -6,6 +6,7 @@ mod files;
 mod gpu;
 mod graph;
 mod groups;
+mod helper;
 mod limits;
 mod mcp;
 mod power;
@@ -13,6 +14,7 @@ mod recorder;
 mod sampler;
 mod services;
 mod startup;
+mod tray;
 mod ui_apps;
 mod ui_assistant;
 mod ui_history;
@@ -58,6 +60,9 @@ fn main() {
         Some("--once") => once(),
         Some("--update") => std::process::exit(updater::cli()),
         Some("--record") => std::process::exit(recorder::run()),
+        Some("--helper") => std::process::exit(helper::run()),
+        Some("--install-helper") => std::process::exit(helper::install()),
+        Some("--uninstall-helper") => std::process::exit(helper::uninstall()),
         Some("--ask") => std::process::exit(ask_cli(&args[1..].join(" "))),
         Some("--mcp") => std::process::exit(mcp::run(args.iter().any(|a| a == "--mcp-allow-actions"))),
         Some("--mcp-allow-actions") if args.iter().any(|a| a == "--mcp") => std::process::exit(mcp::run(true)),

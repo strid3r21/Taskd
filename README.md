@@ -36,6 +36,10 @@ Taskd keeps itself up to date. Tarball installs update automatically at launch. 
 
 **History and alerts.** A small background recorder (a systemd user service, toggled in ⚙) keeps about a week of history. In the Performance tab, switch from **Live** to **1 h / 6 h / 24 h / 7 days** to see what happened while you were away; hover the graph to see which apps were running at that moment. The same recorder sends desktop **alerts** (low memory, CPU maxed out, overheating, a saturated disk, heavy swapping, a failed service, low battery, or an app over a memory limit you set), configurable under ⚙ → Alerts.
 
+**Per-app network usage** (and disk I/O of system services) is something Linux only shows to root. Turn on Taskd's optional helper under ⚙ → *Per-app network* (it asks for your password once). It's a small, sandboxed system service that reads only packet *headers* (the first 128 bytes, truncated in the kernel), attributes traffic to processes, and gives out nothing but per-process byte counts, and only to administrators.
+
+**Tray icon** with a live CPU/memory graph; optionally keep Taskd running in the tray when you close the window (⚙).
+
 Drag the top tabs to reorder them. The ⚙ menu has light/dark themes; window size and position are remembered.
 
 **Keyboard:** `Ctrl+1`–`6` switch tabs · `Ctrl+F` search · `Delete` / `Shift+Delete` end / kill · `Enter` details · `Ctrl+P` pause · `F5` refresh

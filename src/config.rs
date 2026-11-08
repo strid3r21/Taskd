@@ -102,6 +102,9 @@ settings! {
 
     /// Performance time range: "live", "1h", "6h", "24h" or "7d".
     perf_range: String = "live";
+    /// System tray icon, and whether closing the window keeps Taskd running there.
+    tray: bool = true;
+    close_to_tray: bool = false;
     /// AI assistant: provider key (see ai::Provider), model id, API base URL.
     ai_provider: String = "ollama";
     ai_model: String = "";

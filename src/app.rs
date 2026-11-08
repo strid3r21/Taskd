@@ -166,6 +166,13 @@ pub struct App {
     startup: StartupState,
     update: UpdateState,
     tab_drag: Option<Tab>,
+    tray: Option<crate::tray::Tray>,
+    tray_tried: bool,
+    tray_tx: Sender<crate::tray::TrayCmd>,
+    tray_rx: Receiver<crate::tray::TrayCmd>,
+    tray_updated: Option<Instant>,
+    /// Set when the user really wants to quit (tray "Quit"), so close isn't intercepted.
+    quitting: bool,
     /// Recorder state last applied to the systemd user service (None = not yet this session).
     recorder_applied: Option<bool>,
     alerts_open: bool,
@@ -221,9 +228,16 @@ impl App {
             jobs.spawn(|| JobResult::UpdateCheck(updater::check(), false));
         }
         cc.egui_ctx.set_theme(theme_pref(&cfg.theme));
+        let (tray_tx, tray_rx) = channel();
         App {
             update,
             tab_drag: None,
+            tray: None,
+            tray_tried: false,
+            tray_tx,
+            tray_rx,
+            tray_updated: None,
+            quitting: false,
             recorder_applied: None,
             alerts_open: false,
             geom_pending: None,
@@ -456,6 +470,89 @@ impl App {
         self.alerts_open = open;
     }
 
+    /// Per-app network & service I/O: the optional privileged helper.
+    fn helper_controls(&mut self, ui: &mut egui::Ui, kind: &updater::InstallKind) {
+        ui.label(RichText::new("Per-app network & service disk I/O").strong());
+        let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let deb = *kind == updater::InstallKind::Deb;
+        let run = |jobs: &Jobs, args: Vec<String>, done: &'static str| {
+            jobs.spawn(move || match actions::run_elevated(&args) {
+                Ok(()) => JobResult::Status(done.into(), false),
+                Err(e) => JobResult::Status(format!("Helper: {e}"), true),
+            });
+        };
+        let systemctl = actions::sys_bin("systemctl");
+        match self.snap.helper.clone() {
+            Some(v) => {
+                ui.label(RichText::new(format!("✓ Helper running (v{v})")).small());
+                if !deb && v != env!("CARGO_PKG_VERSION") && ui.button("Update helper").clicked() {
+                    run(&self.jobs, vec![exe.clone(), "--install-helper".into()], "Helper updated");
+                    ui.close();
+                }
+                if ui.button("Turn off").clicked() {
+                    let args = if deb {
+                        vec![systemctl, "disable".into(), "--now".into(), "taskd-helper.service".into()]
+                    } else {
+                        vec![exe, "--uninstall-helper".into()]
+                    };
+                    run(&self.jobs, args, "Helper turned off");
+                    ui.close();
+                }
+            }
+            None => {
+                ui.label(
+                    RichText::new("Needs a small privileged background service; Linux only shows this to root.")
+                        .small()
+                        .weak(),
+                );
+                if ui.button("Turn on (asks for your password)").clicked() {
+                    let args = if deb {
+                        vec![systemctl, "enable".into(), "--now".into(), "taskd-helper.service".into()]
+                    } else {
+                        vec![exe, "--install-helper".into()]
+                    };
+                    run(&self.jobs, args, "Helper turned on: per-app network appears within a few seconds");
+                    ui.close();
+                }
+            }
+        }
+    }
+
+    fn tray_logic(&mut self, ctx: &egui::Context) {
+        use crate::tray::{Tray, TrayCmd};
+        if self.cfg.tray && self.tray.is_none() && !self.tray_tried {
+            self.tray_tried = true; // once per session: no tray host = no retries
+            self.tray = Tray::start(ctx.clone(), self.tray_tx.clone());
+        } else if !self.cfg.tray && self.tray.is_some() {
+            self.tray = None;
+            self.tray_tried = false;
+        }
+        while let Ok(cmd) = self.tray_rx.try_recv() {
+            match cmd {
+                TrayCmd::Show => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                TrayCmd::TogglePause => self.toggle_pause(),
+                TrayCmd::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+        // Refresh the tray graph at most every 2 s.
+        if let Some(t) = &self.tray
+            && self.tray_updated.is_none_or(|u| u.elapsed() >= Duration::from_secs(2))
+        {
+            let m = &self.snap.mem;
+            let mem = if m.total > 0 { 100.0 * m.used as f32 / m.total as f32 } else { 0.0 };
+            t.update(self.snap.cpu.usage, mem, self.shared.paused.load(Ordering::Relaxed));
+            self.tray_updated = Some(Instant::now());
+        }
+    }
+
     fn settings_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("⚙", |ui| {
             let kind = self.update.kind.clone().unwrap_or(updater::InstallKind::Unmanaged);
@@ -474,6 +571,13 @@ impl App {
             if ui.button("Reset tab order").clicked() {
                 self.cfg.tab_order.clear();
             }
+            ui.checkbox(&mut self.cfg.tray, "Show tray icon");
+            ui.add_enabled_ui(self.cfg.tray && self.tray.is_some(), |ui| {
+                ui.checkbox(&mut self.cfg.close_to_tray, "Keep running in the tray when closed");
+            });
+            if self.cfg.tray && self.tray.is_none() && self.tray_tried {
+                ui.label(RichText::new("No tray available on this desktop.").small().weak());
+            }
             ui.separator();
             ui.checkbox(&mut self.cfg.record, "Record history & alerts in the background")
                 .on_hover_text("A small user service (taskdm --record) keeps ~7 days of history and raises alerts, even with this window closed.");
@@ -481,6 +585,8 @@ impl App {
                 self.alerts_open = true;
                 ui.close();
             }
+            ui.separator();
+            self.helper_controls(ui, &kind);
             ui.separator();
             ui.checkbox(&mut self.cfg.auto_update, "Check for updates at launch").on_hover_text(match kind {
                 updater::InstallKind::Portable(_) => "Updates are downloaded, verified and installed automatically.",
@@ -701,13 +807,23 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.snap = self.shared.latest();
         self.handle_jobs();
+        self.tray_logic(ctx); // also runs while the window is hidden in the tray
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // Close to tray: hide instead of quitting (unless quitting from the tray menu).
+        if ctx.input(|i| i.viewport().close_requested())
+            && self.cfg.close_to_tray
+            && self.tray.is_some()
+            && !self.quitting
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
         self.shortcuts(&ctx);
 
         egui::Panel::top("top").show(ui, |ui| {

@@ -49,6 +49,8 @@ pub struct Group {
     pub gpu: f32,
     pub read: f64,
     pub write: f64,
+    /// Network bytes/s, received + sent (needs the helper).
+    pub net: f64,
 }
 
 // ------------------------------------------------------------------ desktop entries
@@ -396,6 +398,7 @@ fn group(snap: &Snapshot, my_uid: u32, index: &DesktopIndex, containers: &Contai
                 gpu: 0.0,
                 read: 0.0,
                 write: 0.0,
+                net: 0.0,
             })
             .members
             .push(i);
@@ -449,6 +452,7 @@ fn group(snap: &Snapshot, my_uid: u32, index: &DesktopIndex, containers: &Contai
             g.gpu += p.gpu;
             g.read += p.read_rate;
             g.write += p.write_rate;
+            g.net += p.net_rx + p.net_tx;
         }
         g.gpu = g.gpu.min(100.0);
     }

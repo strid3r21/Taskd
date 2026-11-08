@@ -23,6 +23,7 @@ pub enum Col {
     Gpu,
     Read,
     Write,
+    Net,
     Threads,
     Nice,
     State,
@@ -32,7 +33,7 @@ pub enum Col {
 }
 
 impl Col {
-    pub const ALL: [Col; 15] = [
+    pub const ALL: [Col; 16] = [
         Col::Name,
         Col::Pid,
         Col::User,
@@ -42,6 +43,7 @@ impl Col {
         Col::Gpu,
         Col::Read,
         Col::Write,
+        Col::Net,
         Col::Threads,
         Col::Nice,
         Col::State,
@@ -61,6 +63,7 @@ impl Col {
             Col::Gpu => "gpu",
             Col::Read => "read",
             Col::Write => "write",
+            Col::Net => "net",
             Col::Threads => "threads",
             Col::Nice => "nice",
             Col::State => "state",
@@ -80,6 +83,7 @@ impl Col {
             Col::Gpu => "GPU",
             Col::Read => "Disk read",
             Col::Write => "Disk write",
+            Col::Net => "Network",
             Col::Threads => "Threads",
             Col::Nice => "Nice",
             Col::State => "State",
@@ -117,6 +121,7 @@ impl Col {
             Col::Gpu => a.gpu.total_cmp(&b.gpu),
             Col::Read => a.read_rate.total_cmp(&b.read_rate),
             Col::Write => a.write_rate.total_cmp(&b.write_rate),
+            Col::Net => (a.net_rx + a.net_tx).total_cmp(&(b.net_rx + b.net_tx)),
             Col::Threads => a.threads.cmp(&b.threads),
             Col::Nice => a.nice.cmp(&b.nice),
             Col::State => a.state.cmp(&b.state),
@@ -620,8 +625,12 @@ impl ProcState {
     fn table(&mut self, ui: &mut egui::Ui, snap: &Snapshot, c: &Ctx) -> Option<Action> {
         let hidden = Self::hidden_cols(c.cfg);
         let no_gpu = snap.gpus.is_empty();
-        let cols: Vec<Col> =
-            Col::ALL.into_iter().filter(|c| !hidden.contains(c) && !(no_gpu && *c == Col::Gpu)).collect();
+        let cols: Vec<Col> = Col::ALL
+            .into_iter()
+            .filter(|c| {
+                !hidden.contains(c) && !(no_gpu && *c == Col::Gpu) && !(snap.helper.is_none() && *c == Col::Net)
+            })
+            .collect();
         let sort = Col::from_key(&c.cfg.sort_col).unwrap_or(Col::Cpu);
         let desc = c.cfg.sort_desc;
         let mut act: Option<Action> = None;
@@ -740,6 +749,7 @@ impl ProcState {
                             Col::CpuTime => num(ui, fmt_cpu_time(p.cpu_time)),
                             Col::Read => num(ui, fmt_rate(p.read_rate)),
                             Col::Write => num(ui, fmt_rate(p.write_rate)),
+                            Col::Net => num(ui, fmt_rate(p.net_rx + p.net_tx)),
                             Col::Threads => num(ui, p.threads.to_string()),
                             Col::Nice => num(ui, p.nice.to_string()),
                             Col::State => {

@@ -210,12 +210,13 @@ impl PerfState {
                             }
                         }
                     }
+                    Device::Net(_) if s.helper.is_some() => top_list(ui, groups, &s, Metric::Net, NET),
                     Device::Net(_) => {
                         ui.add_space(14.0);
                         ui.label(
                             RichText::new(
-                                "Per-app network usage isn't shown: Linux only exposes it per process \
-                                 to root (via eBPF/netlink).",
+                                "Per-app network usage needs Taskd's privileged helper (Linux only shows it to root). \
+                                 Turn it on under ⚙ → Per-app network.",
                             )
                             .weak(),
                         );
@@ -684,6 +685,7 @@ enum Metric {
     Disk,
     /// Estimated watts: watts per percent of machine CPU.
     Power(f64),
+    Net,
 }
 
 const BATTERY: Color32 = Color32::from_rgb(0x2f, 0xb8, 0xa8);
@@ -731,6 +733,7 @@ fn top_list(ui: &mut egui::Ui, groups: &[Group], snap: &Snapshot, m: Metric, col
             Metric::Gpu => g.gpu as f64,
             Metric::Disk => g.read + g.write,
             Metric::Power(w_per_pct) => g.cpu as f64 * w_per_pct,
+            Metric::Net => g.net,
         }
     };
     let fmt = |v: f64| -> String {
@@ -740,6 +743,7 @@ fn top_list(ui: &mut egui::Ui, groups: &[Group], snap: &Snapshot, m: Metric, col
             Metric::Gpu => format!("{v:.0}%"),
             Metric::Disk => fmt_rate(v),
             Metric::Power(_) => format!("~{v:.1} W"),
+            Metric::Net => fmt_rate(v),
         }
     };
     let title = match m {
@@ -748,6 +752,7 @@ fn top_list(ui: &mut egui::Ui, groups: &[Group], snap: &Snapshot, m: Metric, col
         Metric::Gpu => "Top apps & services by GPU",
         Metric::Disk => "Top apps & services by disk I/O (all disks)",
         Metric::Power(_) => "Top apps & services by estimated power (from CPU share)",
+        Metric::Net => "Top apps & services by network traffic (all interfaces)",
     };
     let mut top: Vec<&Group> = groups.iter().filter(|g| val(g) > 0.0).collect();
     top.sort_by(|a, b| val(b).total_cmp(&val(a)));

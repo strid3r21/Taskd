@@ -19,6 +19,7 @@ enum Sort {
     Gpu,
     Read,
     Write,
+    Net,
 }
 
 pub struct AppsState {
@@ -80,6 +81,7 @@ impl AppsState {
                 Sort::Gpu => a.gpu.total_cmp(&b.gpu),
                 Sort::Read => a.read.total_cmp(&b.read),
                 Sort::Write => a.write.total_cmp(&b.write),
+                Sort::Net => a.net.total_cmp(&b.net),
             };
             (if desc { o.reverse() } else { o }).then_with(|| a.name.cmp(&b.name))
         });
@@ -123,6 +125,7 @@ impl AppsState {
             .collect();
 
         let show_gpu = !snap.gpus.is_empty();
+        let show_net = snap.helper.is_some();
         let total_mem = snap.mem.total.max(1) as f32;
         let mut sort_click = None;
         let headers: Vec<(&str, Sort)> = [
@@ -133,9 +136,10 @@ impl AppsState {
             ("GPU", Sort::Gpu),
             ("Disk read", Sort::Read),
             ("Disk write", Sort::Write),
+            ("Network", Sort::Net),
         ]
         .into_iter()
-        .filter(|(_, s)| show_gpu || *s != Sort::Gpu)
+        .filter(|(_, s)| (show_gpu || *s != Sort::Gpu) && (show_net || *s != Sort::Net))
         .collect();
 
         let mut tb = TableBuilder::new(ui)
@@ -207,6 +211,9 @@ impl AppsState {
                         }
                         row.col(|ui| num(ui, fmt_rate(g.read)));
                         row.col(|ui| num(ui, fmt_rate(g.write)));
+                        if show_net {
+                            row.col(|ui| num(ui, fmt_rate(g.net)));
+                        }
                         let r = row.response();
                         if r.clicked() {
                             act = Some(Act::Select(g.key.clone()));
@@ -259,6 +266,9 @@ impl AppsState {
                         }
                         row.col(|ui| num(ui, fmt_rate(p.read_rate)));
                         row.col(|ui| num(ui, fmt_rate(p.write_rate)));
+                        if show_net {
+                            row.col(|ui| num(ui, fmt_rate(p.net_rx + p.net_tx)));
+                        }
                         row.response().context_menu(|ui| {
                             ui.label(RichText::new(format!("{} ({})", p.name, p.pid)).strong());
                             ui.separator();

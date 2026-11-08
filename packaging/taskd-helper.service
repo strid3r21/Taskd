@@ -1,0 +1,31 @@
+[Unit]
+Description=Taskd privileged helper (per-app network and disk I/O)
+Documentation=https://github.com/strid3r21/Taskd
+
+[Service]
+ExecStart=/usr/bin/taskdm --helper
+Restart=on-failure
+RestartSec=5
+Nice=5
+RuntimeDirectory=taskd-helper
+RuntimeDirectoryMode=0755
+CapabilityBoundingSet=CAP_NET_RAW CAP_DAC_READ_SEARCH CAP_SYS_PTRACE
+AmbientCapabilities=CAP_NET_RAW CAP_DAC_READ_SEARCH CAP_SYS_PTRACE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_UNIX AF_PACKET
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+MemoryMax=96M
+
+[Install]
+WantedBy=multi-user.target

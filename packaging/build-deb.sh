@@ -17,6 +17,8 @@ install -Dm644 LICENSE "$ROOT/usr/share/doc/taskd-monitor/copyright"
 install -Dm755 packaging/install-update "$ROOT/usr/libexec/taskd-monitor/install-update"
 install -Dm644 packaging/io.github.strid3r21.taskd.policy "$ROOT/usr/share/polkit-1/actions/io.github.strid3r21.taskd.policy"
 install -Dm644 packaging/release-key.pem "$ROOT/usr/share/taskd-monitor/release-key.pem"
+# Optional privileged helper (per-app network): shipped, but only enabled from Taskd's settings.
+install -Dm644 packaging/taskd-helper.service "$ROOT/usr/lib/systemd/system/taskd-helper.service"
 SIZE="$(du -sk "$ROOT/usr" | cut -f1)"
 
 mkdir -p "$ROOT/DEBIAN"
@@ -34,6 +36,24 @@ Description: Fast, lightweight task manager for Linux
  Processes, performance graphs (CPU, memory, disk, network, GPU),
  users, systemd services and startup applications in a single small binary.
 CONTROL
+
+cat > "$ROOT/DEBIAN/postinst" <<'POSTINST'
+#!/bin/sh
+set -e
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+    # Pick up the new binary if the helper is in use.
+    systemctl try-restart taskd-helper.service || true
+fi
+POSTINST
+cat > "$ROOT/DEBIAN/prerm" <<'PRERM'
+#!/bin/sh
+set -e
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+    systemctl disable --now taskd-helper.service || true
+fi
+PRERM
+chmod 755 "$ROOT/DEBIAN/postinst" "$ROOT/DEBIAN/prerm"
 
 mkdir -p "$OUT"
 DEB="$OUT/taskd-monitor_${VERSION}_${ARCH}.deb"

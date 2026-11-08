@@ -65,6 +65,9 @@ pub struct ProcInfo {
     pub kernel: bool,
     /// GPU utilization percent (NVML or DRM fdinfo), 0 when unknown.
     pub gpu: f32,
+    /// Network receive/send rate, bytes/s (needs the privileged helper; 0 otherwise).
+    pub net_rx: f64,
+    pub net_tx: f64,
     /// Total CPU time consumed (user + system), seconds.
     pub cpu_time: f64,
     /// Recent CPU history as % of one core (0..=100, capped), oldest first; `spark_len` valid entries
@@ -148,6 +151,8 @@ pub struct Snapshot {
     pub nets: Vec<NetInfo>,
     pub gpus: Vec<GpuInfo>,
     pub batteries: Vec<crate::power::Battery>,
+    /// Version of the privileged helper if one is answering (per-app network, all disk I/O).
+    pub helper: Option<String>,
     pub load: [f32; 3],
     pub uptime: f64,
     pub boot_time: u64,
@@ -161,6 +166,8 @@ struct ProcEntry {
     spark: [u8; SPARK],
     spark_len: u8,
     rd: u64,
+    /// Helper's cumulative network counters (received, sent) at the previous sample.
+    net: Option<(u64, u64)>,
     wr: u64,
     name: Arc<str>,
     cmd: Arc<str>,
@@ -204,6 +211,8 @@ pub struct Sampler {
     sys: SysFiles,
     gpu: GpuReader,
     power: crate::power::PowerReader,
+    helper: crate::helper::Client,
+    helper_data: Option<crate::helper::HelperData>,
     generation: u64,
     empty: Arc<str>,
     fd_limit: u64,
@@ -239,6 +248,8 @@ impl Sampler {
             },
             gpu: GpuReader::new(),
             power: crate::power::PowerReader::new(),
+            helper: crate::helper::Client::new(),
+            helper_data: None,
             generation: 0,
             empty: Arc::from(""),
             fd_limit: raise_fd_limit(),
@@ -368,6 +379,8 @@ impl Sampler {
         self.sample_misc();
         self.snap.gpus = self.gpu.read(elapsed);
         self.snap.batteries = self.power.read();
+        self.helper_data = self.helper.fetch();
+        self.snap.helper = self.helper_data.as_ref().map(|h| h.version.clone());
         let procs = self.sample_procs(elapsed, total_delta);
 
         let mut out = self.snap.clone();
@@ -690,6 +703,28 @@ impl Sampler {
                     }
                 }
             }
+            // The privileged helper fills in what we can't see: network traffic of every process,
+            // and disk I/O of other users' processes (system services).
+            let (mut net_rx, mut net_tx) = (0.0, 0.0);
+            if let Some(h) = &self.helper_data {
+                if !entry.io_ok
+                    && let Some(&(rd, wr)) = h.io.get(&pid)
+                {
+                    if !fresh && (entry.rd, entry.wr) != (0, 0) {
+                        read_rate = rd.saturating_sub(entry.rd) as f64 / elapsed;
+                        write_rate = wr.saturating_sub(entry.wr) as f64 / elapsed;
+                    }
+                    entry.rd = rd;
+                    entry.wr = wr;
+                }
+                if let Some(&(rx, tx)) = h.net.get(&pid) {
+                    if let Some((prx, ptx)) = entry.net {
+                        net_rx = rx.saturating_sub(prx) as f64 / elapsed;
+                        net_tx = tx.saturating_sub(ptx) as f64 / elapsed;
+                    }
+                    entry.net = Some((rx, tx));
+                }
+            }
 
             out.push(ProcInfo {
                 pid,
@@ -710,6 +745,8 @@ impl Sampler {
                 kernel,
                 gpu: self.gpu.proc_util.get(&pid).copied().unwrap_or(0.0),
                 cpu_time: cpu_ticks as f64 / self.clk_tck,
+                net_rx,
+                net_tx,
                 spark: entry.spark,
                 spark_len: entry.spark_len,
                 unit: entry.unit.clone(),
@@ -747,6 +784,7 @@ impl Sampler {
             spark: [0; SPARK],
             spark_len: 0,
             rd: 0,
+            net: None,
             wr: 0,
             name: Arc::from(name),
             cmd: if cmd.is_empty() { self.empty.clone() } else { Arc::from(cmd) },

@@ -10,6 +10,7 @@ use ksni::blocking::TrayMethods;
 pub enum TrayCmd {
     Show,
     TogglePause,
+    ToggleMute,
     Quit,
 }
 
@@ -17,6 +18,7 @@ pub struct TaskdTray {
     cpu: VecDeque<f32>,
     mem: f32,
     paused: bool,
+    muted: bool,
     tx: Sender<TrayCmd>,
     ctx: egui::Context,
 }
@@ -85,10 +87,11 @@ impl ksni::Tray for TaskdTray {
         ksni::ToolTip {
             title: "Taskd".into(),
             description: format!(
-                "CPU {:.0}% · Memory {:.0}%{}",
+                "CPU {:.0}% · Memory {:.0}%{}{}",
                 self.cpu.back().copied().unwrap_or(0.0),
                 self.mem,
-                if self.paused { " · paused" } else { "" }
+                if self.paused { " · paused" } else { "" },
+                if self.muted { " · notifications muted" } else { "" }
             ),
             icon_name: String::new(),
             icon_pixmap: Vec::new(),
@@ -112,6 +115,13 @@ impl ksni::Tray for TaskdTray {
                 ..Default::default()
             }
             .into(),
+            ksni::menu::CheckmarkItem {
+                label: "Mute notifications".into(),
+                checked: self.muted,
+                activate: Box::new(|t: &mut Self| t.send(TrayCmd::ToggleMute)),
+                ..Default::default()
+            }
+            .into(),
             ksni::MenuItem::Separator,
             StandardItem {
                 label: "Quit".into(),
@@ -130,11 +140,11 @@ pub struct Tray {
 impl Tray {
     /// Register the tray icon; None when the desktop has no tray (StatusNotifier) host.
     pub fn start(ctx: egui::Context, tx: Sender<TrayCmd>) -> Option<Tray> {
-        let t = TaskdTray { cpu: VecDeque::with_capacity(16), mem: 0.0, paused: false, tx, ctx };
+        let t = TaskdTray { cpu: VecDeque::with_capacity(16), mem: 0.0, paused: false, muted: false, tx, ctx };
         t.spawn().ok().map(|handle| Tray { handle })
     }
 
-    pub fn update(&self, cpu: f32, mem: f32, paused: bool) {
+    pub fn update(&self, cpu: f32, mem: f32, paused: bool, muted: bool) {
         self.handle.update(|t| {
             if t.cpu.len() == 14 {
                 t.cpu.pop_front();
@@ -142,6 +152,7 @@ impl Tray {
             t.cpu.push_back(cpu);
             t.mem = mem;
             t.paused = paused;
+            t.muted = muted;
         });
     }
 }

@@ -129,6 +129,8 @@ settings! {
     alert_failed_services: bool = true;
     /// Per-app memory limits: `App name=GB;App name=GB`.
     alert_app_mem: String = "";
+    /// Alert notifications are muted until this time (Unix seconds); `u64::MAX` = until unmuted.
+    alerts_muted_until: u64 = 0u64;
 }
 
 pub fn path() -> Option<PathBuf> {

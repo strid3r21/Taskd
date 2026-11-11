@@ -156,6 +156,20 @@ pub fn notify(title: &str, body: &str, urgent: bool) {
         .status();
 }
 
+/// Whether alert notifications are muted at `now` (Unix seconds).
+pub fn muted(cfg: &Config, now: u64) -> bool {
+    now < cfg.alerts_muted_until
+}
+
+/// "until 15:30" / "until Sat 09:00" / "until you unmute them"; None when not muted.
+pub fn mute_text(cfg: &Config, now: u64) -> Option<String> {
+    let until = cfg.alerts_muted_until;
+    muted(cfg, now).then(|| match until {
+        u64::MAX => "until you unmute them".to_string(),
+        t => format!("until {}", crate::ui_history::fmt_time(t, t - now > 20 * 3600)),
+    })
+}
+
 /// Alert rules, evaluated on every recorded sample with a per-rule cooldown.
 pub struct Alerts {
     recent: VecDeque<(u64, f32, Vec<f32>)>, // (time, cpu %, per-disk busy %)
@@ -413,8 +427,12 @@ pub fn run() -> i32 {
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
             let _ = writeln!(f, "{rec}");
         }
-        for (title, body, urgent) in alerts.check(&snap, &grouper, &cfg) {
-            notify(&title, &body, urgent);
+        // Rules keep running while muted (so cooldowns stay current); only the popups stop.
+        let fired = alerts.check(&snap, &grouper, &cfg);
+        if !muted(&cfg, epoch()) {
+            for (title, body, urgent) in fired {
+                notify(&title, &body, urgent);
+            }
         }
         if last_prune.is_none_or(|t| t.elapsed() > Duration::from_secs(3600)) {
             prune(&dir);
@@ -515,5 +533,16 @@ mod tests {
         a.fire("x", "t", "b".into(), false, &mut out);
         a.fire("x", "t", "b".into(), false, &mut out);
         assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn muting() {
+        let mut cfg = Config::default();
+        assert!(!muted(&cfg, 1000) && mute_text(&cfg, 1000).is_none());
+        cfg.alerts_muted_until = 1000 + 3600;
+        assert!(muted(&cfg, 1000) && mute_text(&cfg, 1000).unwrap().starts_with("until "));
+        assert!(!muted(&cfg, 1000 + 3600), "a timed mute ends by itself");
+        cfg.alerts_muted_until = u64::MAX;
+        assert_eq!(mute_text(&cfg, 1000).as_deref(), Some("until you unmute them"));
     }
 }

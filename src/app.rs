@@ -398,6 +398,7 @@ impl App {
         let c = &mut self.cfg;
         egui::Window::new("Alerts").open(&mut open).resizable(false).default_width(420.0).show(ctx, |ui| {
             ui.label(RichText::new("Desktop notifications from the background recorder (0 = off).").weak());
+            mute_controls(ui, c);
             if !c.record {
                 ui.colored_label(ui.visuals().warn_fg_color, "Background recording is off, so alerts won't fire.");
             }
@@ -535,6 +536,12 @@ impl App {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
                 TrayCmd::TogglePause => self.toggle_pause(),
+                TrayCmd::ToggleMute => {
+                    let now = crate::recorder::epoch();
+                    let m = crate::recorder::muted(&self.cfg, now);
+                    self.cfg.alerts_muted_until = if m { 0 } else { u64::MAX };
+                    self.tray_updated = None; // show the new state right away
+                }
                 TrayCmd::Quit => {
                     self.quitting = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -548,7 +555,8 @@ impl App {
         {
             let m = &self.snap.mem;
             let mem = if m.total > 0 { 100.0 * m.used as f32 / m.total as f32 } else { 0.0 };
-            t.update(self.snap.cpu.usage, mem, self.shared.paused.load(Ordering::Relaxed));
+            let muted = crate::recorder::muted(&self.cfg, crate::recorder::epoch());
+            t.update(self.snap.cpu.usage, mem, self.shared.paused.load(Ordering::Relaxed), muted);
             self.tray_updated = Some(Instant::now());
         }
     }
@@ -585,6 +593,7 @@ impl App {
                 self.alerts_open = true;
                 ui.close();
             }
+            mute_controls(ui, &mut self.cfg);
             ui.separator();
             self.helper_controls(ui, &kind);
             ui.separator();
@@ -913,4 +922,30 @@ fn icon() -> egui::IconData {
         }
     }
     egui::IconData { rgba, width: N as u32, height: N as u32 }
+}
+
+/// "Mute notifications ▸ for 1 hour / 8 hours / until unmuted", or the muted state with Unmute.
+fn mute_controls(ui: &mut egui::Ui, cfg: &mut Config) {
+    let now = crate::recorder::epoch();
+    if let Some(until) = crate::recorder::mute_text(cfg, now) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("Notifications muted {until}")).color(ui.visuals().warn_fg_color));
+            if ui.button("Unmute").clicked() {
+                cfg.alerts_muted_until = 0;
+            }
+        });
+        return;
+    }
+    ui.menu_button("Mute notifications", |ui| {
+        for (label, secs) in [("For 1 hour", 3600), ("For 8 hours", 8 * 3600), ("For 24 hours", 86_400)] {
+            if ui.button(label).clicked() {
+                cfg.alerts_muted_until = now + secs;
+                ui.close();
+            }
+        }
+        if ui.button("Until I unmute them").clicked() {
+            cfg.alerts_muted_until = u64::MAX;
+            ui.close();
+        }
+    });
 }

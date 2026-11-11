@@ -65,6 +65,91 @@ pub enum Source<'a> {
     Battery,
 }
 
+/// Which per-app number in a recorded `top` entry belongs to a graph.
+/// Entry: [name, kind, cpu %, memory MiB, gpu %, disk I/O B/s, network B/s].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Res {
+    Cpu,
+    Mem,
+    Gpu,
+    Io,
+    Net,
+}
+
+impl Res {
+    const ALL: [Res; 5] = [Res::Cpu, Res::Mem, Res::Gpu, Res::Io, Res::Net];
+    fn of(src: &Source) -> Res {
+        match src {
+            // No per-app power figure exists; CPU is what drains a battery.
+            Source::Cpu | Source::Battery => Res::Cpu,
+            Source::Mem => Res::Mem,
+            Source::Gpu(_) => Res::Gpu,
+            Source::Disk(_) => Res::Io,
+            Source::Net(_) => Res::Net,
+        }
+    }
+    fn idx(self) -> usize {
+        match self {
+            Res::Cpu => 2,
+            Res::Mem => 3,
+            Res::Gpu => 4,
+            Res::Io => 5,
+            Res::Net => 6,
+        }
+    }
+    /// This resource's value in a recorded entry (None in records from before it was saved).
+    fn get(self, e: &Value) -> Option<f64> {
+        e.get(self.idx()).and_then(Value::as_f64)
+    }
+    fn fmt(self, v: f64) -> String {
+        match self {
+            Res::Cpu => format!("{v:.0}% CPU"),
+            Res::Mem => fmt_bytes((v * 1_048_576.0) as u64),
+            Res::Gpu => format!("{v:.0}% GPU"),
+            Res::Io => format!("{} disk", fmt_rate(v)),
+            Res::Net => format!("{} network", fmt_rate(v)),
+        }
+    }
+    fn column(self) -> &'static str {
+        match self {
+            Res::Cpu => "Avg CPU",
+            Res::Mem => "Peak memory",
+            Res::Gpu => "Avg GPU",
+            Res::Io => "Avg disk I/O",
+            Res::Net => "Avg network",
+        }
+    }
+    fn cell(self, v: f64) -> String {
+        match self {
+            Res::Cpu => format!("{v:.1}%"),
+            Res::Mem => fmt_bytes((v * 1_048_576.0) as u64),
+            Res::Gpu => format!("{v:.0}%"),
+            Res::Io | Res::Net => fmt_rate(v),
+        }
+    }
+    /// Shown when no app has a value for this resource in a sample.
+    fn none_text(self, recorded: bool) -> &'static str {
+        match self {
+            _ if !recorded => "Per-app use of this wasn't recorded at this time (older Taskd version).",
+            Res::Net => "No per-app network use recorded. It needs the helper: ⚙ → Per-app network.",
+            _ => "No app was using this noticeably.",
+        }
+    }
+}
+
+/// Apps in one record, heaviest first by `res`, with their value (zeros left out).
+fn top_by(rec: &Value, res: Res) -> Vec<(&str, f64)> {
+    let mut v: Vec<(&str, f64)> = rec["top"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| Some((e[0].as_str().unwrap_or("?"), res.get(e)?)))
+        .filter(|(_, x)| *x > 0.0)
+        .collect();
+    v.sort_by(|a, b| b.1.total_cmp(&a.1));
+    v
+}
+
 #[derive(Default)]
 pub struct HistoryView {
     pub range: Range,
@@ -181,16 +266,21 @@ impl HistoryView {
             let rec = &self.records[i];
             let value = ds.iter().map(|s| if unit == "%" { format!("{:.0}%", s[b]) } else { fmt_rate(s[b] as f64) });
             let value = value.collect::<Vec<_>>().join(" / ");
+            let res = Res::of(&src);
+            let apps = top_by(rec, res);
+            let recorded = rec["top"].as_array().into_iter().flatten().any(|e| res.get(e).is_some());
             resp.on_hover_ui_at_pointer(|ui| {
                 ui.label(RichText::new(format!("{}  ·  {value}", fmt_time(times[i], true))).strong());
-                for e in rec["top"].as_array().into_iter().flatten().take(6) {
-                    ui.label(format!(
-                        "{}  {:.0}% CPU  {}",
-                        e[0].as_str().unwrap_or("?"),
-                        e[2].as_f64().unwrap_or(0.0),
-                        fmt_bytes(e[3].as_u64().unwrap_or(0) * 1_048_576)
-                    ));
+                if apps.is_empty() {
+                    ui.label(RichText::new(res.none_text(recorded)).weak());
                 }
+                egui::Grid::new("hist_hover").num_columns(2).spacing([16.0, 2.0]).show(ui, |ui| {
+                    for (name, v) in apps.iter().take(6) {
+                        ui.label(*name);
+                        ui.label(res.fmt(*v));
+                        ui.end_row();
+                    }
+                });
             });
         }
         let s0 = &series[0];
@@ -205,45 +295,57 @@ impl HistoryView {
         self.records.iter().map(|r| f(r).unwrap_or(0.0) as f32).collect()
     }
 
-    /// The apps/services that were heaviest over the period (from each record's top list).
+    /// The apps/services that were heaviest over the period (from each record's top list),
+    /// ranked by the resource this graph shows.
     fn top_during(&self, ui: &mut egui::Ui, src: &Source) {
-        let by_mem = matches!(src, Source::Mem);
-        let by_gpu = matches!(src, Source::Gpu(_));
+        let res = Res::of(src);
         let n = self.records.len().max(1) as f64;
-        let mut acc: HashMap<String, (String, f64, u64, f64)> = HashMap::new(); // kind, cpu sum, max mem, gpu sum
+        // Per name: kind, then per resource the sum (or, for memory, the peak).
+        let mut acc: HashMap<&str, (&str, [f64; 5])> = HashMap::new();
         for r in &self.records {
             for e in r["top"].as_array().into_iter().flatten() {
-                let name = e[0].as_str().unwrap_or("?").to_string();
-                let a = acc.entry(name).or_insert((e[1].as_str().unwrap_or("").to_string(), 0.0, 0, 0.0));
-                a.1 += e[2].as_f64().unwrap_or(0.0);
-                a.2 = a.2.max(e[3].as_u64().unwrap_or(0));
-                a.3 += e[4].as_f64().unwrap_or(0.0);
+                let a = acc.entry(e[0].as_str().unwrap_or("?")).or_insert((e[1].as_str().unwrap_or(""), [0.0; 5]));
+                for (k, m) in Res::ALL.into_iter().enumerate() {
+                    let x = m.get(e).unwrap_or(0.0);
+                    a.1[k] = if m == Res::Mem { a.1[k].max(x) } else { a.1[k] + x };
+                }
             }
         }
-        let mut v: Vec<(String, (String, f64, u64, f64))> = acc.into_iter().collect();
-        if by_mem {
-            v.sort_by_key(|x| std::cmp::Reverse(x.1.2));
-        } else if by_gpu {
-            v.sort_by(|a, b| b.1.3.total_cmp(&a.1.3));
-        } else {
-            v.sort_by(|a, b| b.1.1.total_cmp(&a.1.1));
-        }
+        let value = |vals: &[f64; 5], m: Res| {
+            let k = Res::ALL.iter().position(|x| *x == m).unwrap_or(0);
+            if m == Res::Mem { vals[k] } else { vals[k] / n }
+        };
+        let mut v: Vec<(&str, (&str, [f64; 5]))> = acc.into_iter().filter(|(_, (_, x))| value(x, res) > 0.0).collect();
+        v.sort_by(|a, b| value(&b.1.1, res).total_cmp(&value(&a.1.1, res)));
+        // The graph's own resource first, then CPU and memory for context.
+        let mut cols = vec![res];
+        cols.extend([Res::Cpu, Res::Mem].into_iter().filter(|m| *m != res));
         ui.add_space(14.0);
         ui.label(RichText::new("Heaviest during this period").strong().size(15.0));
-        egui::Grid::new("hist_top").num_columns(4).striped(true).spacing([16.0, 4.0]).show(ui, |ui| {
+        if v.is_empty() {
+            let recorded = self
+                .records
+                .iter()
+                .flat_map(|r| r["top"].as_array().into_iter().flatten())
+                .any(|e| res.get(e).is_some());
+            ui.label(RichText::new(res.none_text(recorded)).weak());
+            return;
+        }
+        egui::Grid::new("hist_top").num_columns(cols.len() + 1).striped(true).spacing([16.0, 4.0]).show(ui, |ui| {
             ui.label(RichText::new("Name").weak());
-            ui.label(RichText::new("Avg CPU").weak());
-            ui.label(RichText::new("Peak memory").weak());
-            ui.label(RichText::new("Avg GPU").weak());
+            for m in &cols {
+                ui.label(RichText::new(m.column()).weak());
+            }
             ui.end_row();
-            for (name, (kind, cpu, mem, gpu)) in v.iter().take(10) {
+            for (name, (kind, vals)) in v.iter().take(10) {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(name).strong());
-                    ui.label(RichText::new(kind).small().weak());
+                    ui.label(RichText::new(*name).strong());
+                    ui.label(RichText::new(*kind).small().weak());
                 });
-                ui.label(format!("{:.1}%", cpu / n));
-                ui.label(fmt_bytes(mem * 1_048_576));
-                ui.label(format!("{:.0}%", gpu / n));
+                for (j, m) in cols.iter().enumerate() {
+                    let t = m.cell(value(vals, *m));
+                    ui.label(if j == 0 { RichText::new(t).strong() } else { RichText::new(t) });
+                }
                 ui.end_row();
             }
         });
@@ -264,5 +366,32 @@ pub fn fmt_time(t: u64, with_day: bool) -> String {
         format!("{} {:02}:{:02}", DAYS[tm.tm_wday.clamp(0, 6) as usize], tm.tm_hour, tm.tm_min)
     } else {
         format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn hover_lists_the_graphs_own_resource() {
+        // [name, kind, cpu %, memory MiB, gpu %, disk I/O B/s, network B/s]
+        let rec = json!({"top": [
+            ["Firefox", "app", 40.0, 2000, 5.0, 1000.0, 50000.0],
+            ["Steam", "app", 2.0, 900, 80.0, 9000000.0, 0.0],
+            ["Old", "app", 9.0, 100, 0.0],
+        ]});
+        let names = |r: Res| top_by(&rec, r).into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+        assert_eq!(names(Res::Cpu), ["Firefox", "Old", "Steam"]);
+        assert_eq!(names(Res::Gpu), ["Steam", "Firefox"]);
+        assert_eq!(names(Res::Io), ["Steam", "Firefox"]);
+        assert_eq!(names(Res::Net), ["Firefox"]);
+        assert_eq!(top_by(&rec, Res::Mem)[0], ("Firefox", 2000.0));
+        assert_eq!(Res::of(&Source::Disk("sda")), Res::Io);
+        assert_eq!(Res::Gpu.fmt(80.0), "80% GPU");
+        // Records written before disk/network were saved don't pretend the apps used none.
+        let old = json!({"top": [["Old", "app", 9.0, 100, 0.0]]});
+        assert!(top_by(&old, Res::Io).is_empty() && Res::Io.get(&old["top"][0]).is_none());
     }
 }

@@ -245,31 +245,52 @@ impl PerfState {
         let (mut reset, mut hide, mut rename) = (false, None, None);
         for (dev, key) in &devices {
             let title = names.get(key).cloned().unwrap_or_else(|| default_title(*dev, s));
-            let r = self.item(ui, *dev, s, &title);
+            // The dragged item is drawn on a layer above everything and moved with the pointer;
+            // its slot stays in place (outlined) so the list doesn't jump around.
+            let lifted = self.drag.as_deref() == Some(key.as_str());
+            let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("perf_drag_layer"));
+            let builder = if lifted { egui::UiBuilder::new().layer_id(layer) } else { egui::UiBuilder::new() };
+            let (r, grip) = ui.scope_builder(builder, |ui| self.item(ui, *dev, s, &title, key, lifted)).inner;
+            if lifted {
+                if let Some((p, o)) = ui.input(|i| i.pointer.interact_pos().zip(i.pointer.press_origin())) {
+                    let t = egui::emath::TSTransform::from_translation(Vec2::new(0.0, p.y - o.y));
+                    ui.ctx().transform_layer_shapes(layer, t);
+                }
+                let v = ui.visuals();
+                ui.painter().rect(
+                    r.rect,
+                    4.0,
+                    v.faint_bg_color,
+                    egui::Stroke::new(1.0, v.weak_text_color()),
+                    egui::StrokeKind::Inside,
+                );
+            }
             rects.push(r.rect);
             if r.clicked() {
                 self.sel = *dev;
             }
-            if r.drag_started() {
+            if grip.drag_started() {
                 self.drag = Some(key.clone());
             }
-            r.on_hover_text("Drag to reorder · right-click to rename or hide").context_menu(|ui| {
-                ui.label(RichText::new(&title).strong());
-                ui.separator();
-                if ui.button("Rename…").clicked() {
-                    rename = Some((key.clone(), title.clone(), default_title(*dev, s)));
-                    ui.close();
-                }
-                if ui.add_enabled(devices.len() > 1, egui::Button::new("Hide")).clicked() {
-                    hide = Some(key.clone());
-                    ui.close();
-                }
-                ui.separator();
-                if ui.button("Reset order").clicked() {
-                    reset = true;
-                    ui.close();
-                }
-            });
+            r.on_hover_text("Right-click to rename or hide · drag the dots on the right to reorder").context_menu(
+                |ui| {
+                    ui.label(RichText::new(&title).strong());
+                    ui.separator();
+                    if ui.button("Rename…").clicked() {
+                        rename = Some((key.clone(), title.clone(), default_title(*dev, s)));
+                        ui.close();
+                    }
+                    if ui.add_enabled(devices.len() > 1, egui::Button::new("Hide")).clicked() {
+                        hide = Some(key.clone());
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Reset order").clicked() {
+                        reset = true;
+                        ui.close();
+                    }
+                },
+            );
         }
         if reset {
             cfg.perf_order.clear();
@@ -388,8 +409,18 @@ impl PerfState {
         }
     }
 
-    /// One sidebar entry: sparkline + name + current value. Clickable and draggable.
-    fn item(&self, ui: &mut egui::Ui, dev: Device, s: &Snapshot, name: &str) -> egui::Response {
+    /// One sidebar entry: sparkline + name + current value, with a grip on the right for
+    /// reordering. Returns the entry (click / right-click) and the grip (drag) responses.
+    /// `lifted`: drawn opaque with a shadow while it's being dragged.
+    fn item(
+        &self,
+        ui: &mut egui::Ui,
+        dev: Device,
+        s: &Snapshot,
+        name: &str,
+        key: &str,
+        lifted: bool,
+    ) -> (egui::Response, egui::Response) {
         let (_built_in, sub, hist, max, col): (String, String, &History, f32, Color32) = match dev {
             Device::Cpu => {
                 let cpu = &s.cpu;
@@ -439,25 +470,52 @@ impl PerfState {
         };
         let title = name.to_string(); // nickname or built-in name, from the caller
         let selected = self.sel == dev;
-        let frame = egui::Frame::new().inner_margin(6.0).corner_radius(4.0).fill(if selected {
-            col.gamma_multiply(0.15)
-        } else {
-            Color32::TRANSPARENT
-        });
+        // Same stroke width whether lifted or not, so picking an item up doesn't shift its content.
+        let mut frame = egui::Frame::new()
+            .inner_margin(6.0)
+            .corner_radius(4.0)
+            .stroke(egui::Stroke::new(1.0, Color32::TRANSPARENT))
+            .fill(if selected { col.gamma_multiply(0.15) } else { Color32::TRANSPARENT });
+        if lifted {
+            let v = ui.visuals();
+            let fill = if selected { v.window_fill.lerp_to_gamma(col, 0.15) } else { v.window_fill };
+            frame = frame.fill(fill).stroke(egui::Stroke::new(1.0, v.selection.stroke.color)).shadow(v.popup_shadow);
+        }
+        let mut grip = None;
         let r = frame
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    graph(ui, Vec2::new(64.0, 40.0), &[Series::new(hist, col)], max, false);
-                    ui.vertical(|ui| {
-                        ui.add(egui::Label::new(RichText::new(title).strong()).truncate());
-                        ui.add(egui::Label::new(RichText::new(sub).small()).truncate());
+                let row = Vec2::new(ui.available_width(), 40.0);
+                ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    grip = Some(grip_handle(ui, egui::Id::new(("perf_grip", key)), lifted));
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        graph(ui, Vec2::new(64.0, 40.0), &[Series::new(hist, col)], max, false);
+                        ui.vertical(|ui| {
+                            ui.add(egui::Label::new(RichText::new(title).strong()).truncate());
+                            ui.add(egui::Label::new(RichText::new(sub).small()).truncate());
+                        });
                     });
                 });
             })
             .response;
-        r.interact(Sense::click_and_drag())
+        let grip = grip.expect("grip is always drawn");
+        (r.interact(Sense::click()), grip)
     }
+}
+
+/// Six-dot drag handle. Shows a grab cursor on hover.
+fn grip_handle(ui: &mut egui::Ui, id: egui::Id, active: bool) -> egui::Response {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 40.0), Sense::hover());
+    let r = ui.interact(rect, id, Sense::drag());
+    let v = ui.visuals();
+    let color = if active || r.hovered() || r.dragged() { v.strong_text_color() } else { v.weak_text_color() };
+    let c = rect.center();
+    for dx in [-2.5, 2.5] {
+        for dy in [-5.0, 0.0, 5.0] {
+            ui.painter().circle_filled(c + Vec2::new(dx, dy), 1.6, color);
+        }
+    }
+    r.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text("Drag to reorder")
 }
 
 fn header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
@@ -887,5 +945,51 @@ mod tests {
         assert_eq!(order(""), keys(&["cpu", "mem", "disk:nvme0n1", "net:enp6s0"]));
         // Saved keys first in saved order; unknown/stale keys ignored; unsaved devices keep default order after.
         assert_eq!(order("net:enp6s0,gone:x,cpu"), keys(&["net:enp6s0", "cpu", "mem", "disk:nvme0n1"]));
+    }
+
+    #[test]
+    fn drag_by_grip_lifts_the_item_and_reorders() {
+        use egui::{Event, PointerButton, Pos2, RawInput, Rect};
+        let ctx = egui::Context::default();
+        let mut st = PerfState::default();
+        let mut cfg = Config::default();
+        let s = Snapshot::default(); // CPU, Memory
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 600.0));
+        let frame = |events: Vec<Event>, st: &mut PerfState, cfg: &mut Config| {
+            let input = RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| st.sidebar(ui, &s, cfg));
+            out.textures_delta.clear();
+            // Centres of the grip dots drawn this frame.
+            out.shapes
+                .into_iter()
+                .filter_map(|c| match c.shape {
+                    egui::Shape::Circle(c) if (c.radius - 1.6).abs() < 0.01 => Some(c.center),
+                    _ => None,
+                })
+                .collect::<Vec<Pos2>>()
+        };
+        let _ = frame(vec![], &mut st, &mut cfg);
+        let grip = ctx.read_response(egui::Id::new(("perf_grip", "cpu"))).expect("grip drawn").rect;
+        let start = grip.center();
+        let press = |pos: Pos2, pressed: bool| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let _ = frame(vec![Event::PointerMoved(start), press(start, true)], &mut st, &mut cfg);
+        let end = start + Vec2::new(0.0, 80.0); // past the middle of Memory
+        for k in 1..=4 {
+            let _ = frame(vec![Event::PointerMoved(start + Vec2::new(0.0, 20.0 * k as f32))], &mut st, &mut cfg);
+        }
+        assert_eq!(st.drag.as_deref(), Some("cpu"), "dragging the grip starts a reorder");
+        let dots = frame(vec![], &mut st, &mut cfg);
+        let near = |p: Pos2| dots.iter().any(|d| d.distance(p) < 0.5);
+        // The CPU item's grip is drawn where the pointer is now, not in its slot.
+        assert!(near(start + Vec2::new(2.5, 80.0)) && near(start + Vec2::new(-2.5, 75.0)), "{dots:?}");
+        assert!(!near(start + Vec2::new(2.5, 0.0)), "{dots:?}");
+        let _ = frame(vec![press(end, false)], &mut st, &mut cfg);
+        assert_eq!(st.drag, None);
+        assert_eq!(cfg.perf_order, "mem,cpu");
     }
 }

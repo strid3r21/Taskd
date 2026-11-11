@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 use crate::config::Config;
-use crate::groups::{Grouper, Kind};
+use crate::groups::{Group, Grouper, Kind};
 use crate::sampler::{Sampler, Snapshot};
 use crate::util::fmt_bytes;
 
@@ -57,18 +57,42 @@ pub fn record(s: &Snapshot, g: &Grouper) -> Value {
     let pct = |a: u64, b: u64| if b == 0 { 0.0 } else { (1000.0 * a as f64 / b as f64).round() / 10.0 };
     // Round in f64: an f32 like 1.3 would serialize as 1.2999999523162842.
     let r1 = |v: f32| (v as f64 * 10.0).round() / 10.0;
-    // Heaviest apps/services/containers: top 5 by CPU plus top 5 by memory.
-    // Lone processes only count when they're actually heavy (busy, or holding lots of memory).
-    let mut gs: Vec<_> =
-        g.groups.iter().filter(|x| x.kind != Kind::Process || x.cpu > 1.0 || x.mem > 200 * 1_048_576).collect();
+    // Heaviest apps/services/containers: the top 5 by each resource the history graphs show
+    // (CPU, memory, GPU, disk I/O, network), so hovering any graph can say who was using it.
+    // Entry: [name, kind, cpu %, memory MiB, gpu %, disk I/O B/s, network B/s].
+    // Lone processes only count when they're actually heavy.
+    let io = |x: &Group| x.read + x.write;
+    let gs: Vec<&Group> = g
+        .groups
+        .iter()
+        .filter(|x| {
+            x.kind != Kind::Process
+                || x.cpu > 1.0
+                || x.mem > 200 * 1_048_576
+                || x.gpu > 1.0
+                || io(x) > 1_048_576.0
+                || x.net > 102_400.0
+        })
+        .collect();
+    let metrics: [&dyn Fn(&Group) -> f64; 5] =
+        [&|x| x.cpu as f64, &|x| x.mem as f64, &|x| x.gpu as f64, &io, &|x| x.net];
     let mut top: Vec<Value> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    gs.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
-    let by_cpu: Vec<_> = gs.iter().take(5).copied().collect();
-    gs.sort_by_key(|x| std::cmp::Reverse(x.mem));
-    for x in by_cpu.into_iter().chain(gs.iter().take(5).copied()) {
-        if seen.insert(&x.key) {
-            top.push(json!([x.name, x.kind.label(), r1(x.cpu), x.mem / 1_048_576, r1(x.gpu)]));
+    for m in metrics {
+        let mut v: Vec<&Group> = gs.iter().copied().filter(|x| m(x) > 0.0).collect();
+        v.sort_by(|a, b| m(b).total_cmp(&m(a)));
+        for x in v.into_iter().take(5) {
+            if seen.insert(&x.key) {
+                top.push(json!([
+                    x.name,
+                    x.kind.label(),
+                    r1(x.cpu),
+                    x.mem / 1_048_576,
+                    r1(x.gpu),
+                    io(x).round(),
+                    x.net.round()
+                ]));
+            }
         }
     }
     json!({

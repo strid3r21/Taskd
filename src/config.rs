@@ -133,6 +133,11 @@ settings! {
     alert_pressure: bool = true;
     /// Per-app memory limits: `App name=GB;App name=GB`.
     alert_app_mem: String = "";
+    /// Automatic rules (see rules.rs): `priority:low:App;memory:4:App;cpu:50:App`.
+    rules: String = "";
+    /// While one of `game_apps` runs, other apps get low priority.
+    game_mode: bool = false;
+    game_apps: String = "Steam";
     /// Alert notifications are muted until this time (Unix seconds); `u64::MAX` = until unmuted.
     alerts_muted_until: u64 = 0u64;
 }

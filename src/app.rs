@@ -92,6 +92,8 @@ pub enum JobResult {
     /// "Find open file" results: matches and how many processes couldn't be inspected.
     FileHolders(Vec<crate::files::Holder>, usize),
     Report(String),
+    /// The desktop shortcut that opens Taskd (after checking or changing it).
+    Shortcut(Option<String>, Option<Result<String, String>>),
     Scan(crate::storage::ScanResult),
     History(crate::ui_history::Range, Vec<serde_json::Value>, Vec<crate::events::Event>),
     /// Timeline tab: (range index, events).
@@ -122,6 +124,8 @@ pub struct Ctx<'a> {
     pub elevate: &'a mut Option<(String, Vec<String>)>,
     pub my_uid: u32,
     pub switch_to: &'a mut Option<Tab>,
+    /// Open the Automatic rules window with a new rule for this app.
+    pub open_rules: &'a mut Option<String>,
     /// Apps/services grouping; only computed while a tab that uses it is visible.
     pub groups: &'a [Group],
     pub grouper: &'a Grouper,
@@ -205,6 +209,10 @@ pub struct App {
     alerts_open: bool,
     /// System report window: None = closed, Some(None) = being generated.
     report: Option<Option<String>>,
+    rules_win: crate::ui_rules::RulesWindow,
+    /// Global shortcut that opens Taskd: None = not checked yet.
+    shortcut: Option<Option<String>>,
+    shortcut_choice: usize,
     /// Window geometry waiting to be saved once it has been stable for a moment.
     geom_pending: Option<(String, Instant)>,
 }
@@ -258,6 +266,14 @@ impl App {
         }
         cc.egui_ctx.set_theme(theme_pref(&cfg.theme));
         let (tray_tx, tray_rx) = channel();
+        {
+            // Later launches ask this window to come to the front instead of opening another.
+            let (tx, ctx) = (tray_tx.clone(), cc.egui_ctx.clone());
+            crate::shortcut::listen(move || {
+                let _ = tx.send(crate::tray::TrayCmd::Show);
+                ctx.request_repaint();
+            });
+        }
         App {
             update,
             tab_drag: None,
@@ -270,6 +286,9 @@ impl App {
             recorder_applied: None,
             alerts_open: false,
             report: None,
+            rules_win: Default::default(),
+            shortcut: None,
+            shortcut_choice: 0,
             geom_pending: None,
             shared,
             snap,
@@ -305,6 +324,14 @@ impl App {
                 JobResult::History(range, recs, ev) => self.perf.history.loaded(range, recs, ev),
                 JobResult::Events(range, res) => self.events.loaded(range, res),
                 JobResult::Scan(r) => self.storage.scanned(r),
+                JobResult::Shortcut(cur, msg) => {
+                    self.shortcut = Some(cur);
+                    match msg {
+                        Some(Ok(m)) => self.status = Some((m, false, Instant::now())),
+                        Some(Err(e)) => self.status = Some((format!("Shortcut: {e}"), true, Instant::now())),
+                        None => {}
+                    }
+                }
                 JobResult::Report(text) => {
                     if self.report.is_some() {
                         self.report = Some(Some(text));
@@ -567,6 +594,50 @@ impl App {
     }
 
     /// Per-app network & service I/O: the optional privileged helper.
+    fn shortcut_controls(&mut self, ui: &mut egui::Ui) {
+        use crate::shortcut::{self, CHOICES, Desktop};
+        ui.label(RichText::new("Keyboard shortcut").strong());
+        if shortcut::desktop() == Desktop::Other {
+            ui.label(RichText::new("Add a shortcut for `taskdm` in your desktop's keyboard settings.").small().weak());
+            return;
+        }
+        let Some(cur) = self.shortcut.clone() else {
+            self.shortcut = Some(None);
+            self.jobs.spawn(|| JobResult::Shortcut(shortcut::current(), None));
+            return;
+        };
+        let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "taskdm".into());
+        match &cur {
+            Some(b) => {
+                ui.label(RichText::new(format!("✓ {} opens Taskd", shortcut::label_for(b))).small());
+                if ui.button("Remove shortcut").clicked() {
+                    self.jobs.spawn(|| {
+                        let r = shortcut::remove().map(|()| "Shortcut removed".to_string());
+                        JobResult::Shortcut(shortcut::current(), Some(r))
+                    });
+                }
+            }
+            None => {
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("shortcut_choice")
+                        .selected_text(CHOICES[self.shortcut_choice].0)
+                        .show_ui(ui, |ui| {
+                            for (i, c) in CHOICES.iter().enumerate() {
+                                ui.selectable_value(&mut self.shortcut_choice, i, c.0);
+                            }
+                        });
+                    if ui.button("Set").clicked() {
+                        let choice = self.shortcut_choice;
+                        self.jobs.spawn(move || {
+                            let r = shortcut::set(choice, &exe);
+                            JobResult::Shortcut(shortcut::current(), Some(r))
+                        });
+                    }
+                });
+            }
+        }
+    }
+
     fn helper_controls(&mut self, ui: &mut egui::Ui, kind: &updater::InstallKind) {
         ui.label(RichText::new("Per-app network, service disk I/O & CPU power").strong());
         let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
@@ -688,11 +759,17 @@ impl App {
                 self.alerts_open = true;
                 ui.close();
             }
+            if ui.button("Automatic rules…").on_hover_text("Priority / memory / CPU rules per app, and game mode").clicked() {
+                self.rules_win.open_for(&self.cfg, None);
+                ui.close();
+            }
             if ui.button("System report…").on_hover_text("A shareable summary of this machine and its state").clicked() {
                 self.open_report();
                 ui.close();
             }
             mute_controls(ui, &mut self.cfg);
+            ui.separator();
+            self.shortcut_controls(ui);
             ui.separator();
             self.helper_controls(ui, &kind);
             ui.separator();
@@ -949,6 +1026,7 @@ impl eframe::App for App {
         if matches!(self.tab, Tab::Apps | Tab::Performance) {
             self.grouper.update(&self.snap, self.my_uid);
         }
+        let mut open_rules = None::<String>;
         egui::CentralPanel::default_margins().show(ui, |ui| {
             let snap = self.snap.clone();
             let mut c = Ctx {
@@ -959,6 +1037,7 @@ impl eframe::App for App {
                 elevate: &mut self.elevate,
                 my_uid: self.my_uid,
                 switch_to: &mut switch_to,
+                open_rules: &mut open_rules,
                 groups: &self.grouper.groups,
                 grouper: &self.grouper,
             };
@@ -974,6 +1053,9 @@ impl eframe::App for App {
                 Tab::Storage => self.storage.ui(ui, &mut c),
             }
         });
+        if let Some(app) = open_rules {
+            self.rules_win.open_for(&self.cfg, Some(&app));
+        }
         if let Some(t) = switch_to {
             self.tab = t;
         }
@@ -985,6 +1067,18 @@ impl eframe::App for App {
         self.apply_recorder();
         self.alerts_window(&ctx);
         self.report_window(&ctx);
+        if self.rules_win.open {
+            let mut running: Vec<String> = self
+                .grouper
+                .groups
+                .iter()
+                .filter(|g| g.mine && matches!(g.kind, crate::groups::Kind::App | crate::groups::Kind::Container))
+                .map(|g| g.name.clone())
+                .collect();
+            running.sort_by_key(|n| n.to_lowercase());
+            running.dedup();
+            self.rules_win.show(&ctx, &mut self.cfg, &running);
+        }
         if self.cfg != self.saved {
             self.cfg.save();
             self.saved = self.cfg.clone();

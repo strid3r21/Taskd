@@ -449,6 +449,7 @@ pub fn run() -> i32 {
     // SAFETY: getuid never fails.
     let uid = unsafe { libc::getuid() };
     let mut alerts = Alerts::new();
+    let mut rules = crate::rules::Engine::default();
     // Crashes / OOM kills arrive from a journal follower thread.
     let (ev_tx, ev_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || crate::events::follow(|e| drop(ev_tx.send(e))));
@@ -463,6 +464,9 @@ pub fn run() -> i32 {
         }
         let snap = sampler.sample();
         grouper.update(&snap, uid);
+        for line in rules.tick(&snap, &grouper, uid, &cfg) {
+            eprintln!("rules: {line}");
+        }
         let rec = record(&snap, &grouper);
         let file = dir.join(day_file(epoch()));
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {

@@ -240,6 +240,14 @@ impl AppsState {
                                 act = Some(Act::Limit(g.key.clone()));
                                 ui.close();
                             }
+                            if ui
+                                .button("Add an automatic rule…")
+                                .on_hover_text("Always give this app low/high priority or a memory/CPU cap")
+                                .clicked()
+                            {
+                                *c.open_rules = Some(g.name.clone());
+                                ui.close();
+                            }
                             if let Some(id) = g.key.strip_prefix("ctr:") {
                                 ui.separator();
                                 for (label, verb) in [("Stop container", "stop"), ("Restart container", "restart")] {

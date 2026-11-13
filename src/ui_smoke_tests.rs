@@ -37,7 +37,7 @@ impl Harness {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0))),
             ..Default::default()
         };
-        let (mut status, mut elevate, mut switch_to) = (None, None, None);
+        let (mut status, mut elevate, mut switch_to, mut open_rules) = (None, None, None, None);
         let mut out = self.ctx.run_ui(input, |ui| {
             let mut c = Ctx {
                 snap: &self.snap,
@@ -47,6 +47,7 @@ impl Harness {
                 elevate: &mut elevate,
                 my_uid: 0,
                 switch_to: &mut switch_to,
+                open_rules: &mut open_rules,
                 groups: &self.grouper.groups,
                 grouper: &self.grouper,
             };

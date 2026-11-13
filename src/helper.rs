@@ -247,6 +247,11 @@ fn capture_loop(counters: Arc<Mutex<Counters>>) -> std::io::Error {
 
 /// Root, or a member of an admin group (by the peer's kernel-verified uid).
 fn peer_allowed(stream: &UnixStream) -> bool {
+    peer_uid(stream).is_some_and(|uid| uid == 0 || user_in_admin_group(uid))
+}
+
+/// The connecting process's uid, as verified by the kernel.
+pub fn peer_uid(stream: &UnixStream) -> Option<u32> {
     let mut cred = libc::ucred { pid: 0, uid: u32::MAX, gid: u32::MAX };
     let mut len = std::mem::size_of::<libc::ucred>() as u32;
     // SAFETY: SO_PEERCRED fills a ucred of the given size.
@@ -259,7 +264,7 @@ fn peer_allowed(stream: &UnixStream) -> bool {
             &mut len,
         )
     } == 0;
-    ok && (cred.uid == 0 || user_in_admin_group(cred.uid))
+    ok.then_some(cred.uid)
 }
 
 fn user_in_admin_group(uid: u32) -> bool {

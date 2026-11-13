@@ -13,9 +13,11 @@ mod mcp;
 mod power;
 mod recorder;
 mod report;
+mod rules;
 mod sampler;
 mod sensors;
 mod services;
+mod shortcut;
 mod startup;
 mod storage;
 mod tray;
@@ -26,6 +28,7 @@ mod ui_history;
 mod ui_limits;
 mod ui_performance;
 mod ui_processes;
+mod ui_rules;
 #[cfg(test)]
 mod ui_smoke_tests;
 mod ui_storage;
@@ -84,6 +87,10 @@ fn main() {
             std::process::exit(2);
         }
         None => {
+            // Already open (e.g. launched again from the keyboard shortcut): bring it forward.
+            if shortcut::ask_running_to_show() {
+                return;
+            }
             if let Err(e) = app::run() {
                 eprintln!("taskdm: {e}");
                 std::process::exit(1);

@@ -74,9 +74,18 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
     }
 }
 
+/// Release asset names for this CPU: (tarball arch, Debian arch).
+pub fn arch_names() -> Option<(&'static str, &'static str)> {
+    match std::env::consts::ARCH {
+        "x86_64" => Some(("x86_64", "amd64")),
+        "aarch64" => Some(("aarch64", "arm64")),
+        _ => None,
+    }
+}
+
 pub fn install_kind() -> InstallKind {
-    if std::env::consts::ARCH != "x86_64" {
-        return InstallKind::Unmanaged; // releases only ship x86_64 builds
+    if arch_names().is_none() {
+        return InstallKind::Unmanaged; // no release builds for this CPU
     }
     let Ok(exe) = std::env::current_exe() else { return InstallKind::Unmanaged };
     let exe = exe.canonicalize().unwrap_or(exe);
@@ -137,11 +146,12 @@ pub fn check() -> Result<Option<Release>, String> {
         sums: None,
         sums_sig: None,
     };
+    let (tar_arch, deb_arch) = arch_names().unwrap_or(("x86_64", "amd64"));
     for a in json["assets"].as_array().into_iter().flatten() {
         let (Some(name), Some(url)) = (a["name"].as_str(), a["browser_download_url"].as_str()) else { continue };
-        if name == format!("{ASSET_PREFIX}_{version}_amd64.deb") {
+        if name == format!("{ASSET_PREFIX}_{version}_{deb_arch}.deb") {
             rel.deb = Some(url.to_string());
-        } else if name == format!("{ASSET_PREFIX}-{version}-x86_64-linux.tar.gz") {
+        } else if name == format!("{ASSET_PREFIX}-{version}-{tar_arch}-linux.tar.gz") {
             rel.tarball = Some(url.to_string());
         } else if name == "SHA256SUMS" {
             rel.sums = Some(url.to_string());
@@ -214,7 +224,8 @@ pub fn install(rel: &Release, kind: &InstallKind) -> Result<PathBuf, String> {
             if !status.success() {
                 return Err("couldn't unpack the update".into());
             }
-            let new_bin = dir.join(format!("{ASSET_PREFIX}-{}-x86_64-linux", rel.version)).join("taskdm");
+            let tar_arch = arch_names().map_or("x86_64", |a| a.0);
+            let new_bin = dir.join(format!("{ASSET_PREFIX}-{}-{tar_arch}-linux", rel.version)).join("taskdm");
             // Make sure it actually runs on this system before swapping it in.
             let ok = Command::new(&new_bin).arg("--version").output().is_ok_and(|o| o.status.success());
             if !ok {
@@ -321,6 +332,12 @@ pub fn describe(kind: &InstallKind) -> &'static str {
     match kind {
         InstallKind::Deb => ".deb install",
         InstallKind::Portable(_) => "tarball install",
+        // A system path that isn't a .deb: pacman (AUR), rpm or a manual copy.
+        InstallKind::Unmanaged
+            if std::env::current_exe().is_ok_and(|p| p.starts_with("/usr/") || p.starts_with("/opt/")) =>
+        {
+            "installed by your package manager (update it there)"
+        }
         InstallKind::Unmanaged => "development build",
     }
 }

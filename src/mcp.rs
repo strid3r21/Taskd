@@ -349,6 +349,7 @@ impl Server {
     // ------------------------------------------------------------ tools
 
     fn overview(&mut self) -> Value {
+        crate::sensors::want();
         let s = self.snapshot();
         let m = &s.mem;
         json!({

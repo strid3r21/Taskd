@@ -201,6 +201,7 @@ pub fn build(s: &Snapshot, g: &Grouper) -> String {
 
 /// `taskdm --report`: sample for a second (rates need two samples) and print the report.
 pub fn cli() -> i32 {
+    crate::sensors::want();
     let mut sampler = crate::sampler::Sampler::new();
     sampler.sample();
     std::thread::sleep(std::time::Duration::from_secs(1));

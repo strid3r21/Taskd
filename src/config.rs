@@ -133,6 +133,8 @@ settings! {
     alert_pressure: bool = true;
     /// Per-app memory limits: `App name=GB;App name=GB`.
     alert_app_mem: String = "";
+    /// Other machines watched over SSH (Machines tab), comma-separated.
+    remote_hosts: String = "";
     /// Automatic rules (see rules.rs): `priority:low:App;memory:4:App;cpu:50:App`.
     rules: String = "";
     /// While one of `game_apps` runs, other apps get low priority.

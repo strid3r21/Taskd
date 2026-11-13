@@ -397,7 +397,7 @@ impl Sampler {
         let rapl = self.helper_data.as_ref().map(|h| &h.rapl);
         self.snap.cpu.power_w = self.sensors.read(&mut self.buf, elapsed, rapl);
         self.snap.cpu.has_rapl = self.sensors.has_rapl();
-        self.snap.sensors = self.sensors.sensors().to_vec();
+        self.snap.sensors = self.sensors.sensors();
         self.snap.pressure = self.sensors.pressure.clone();
         let procs = self.sample_procs(elapsed, total_delta);
 

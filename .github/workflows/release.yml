@@ -26,6 +26,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
@@ -50,30 +52,42 @@ jobs:
           cargo zigbuild --version 2>/dev/null | grep -q "$CARGO_ZIGBUILD_VERSION" \
             || cargo install cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION" --locked
 
-      - name: Build (glibc ${{ env.GLIBC_BASELINE }} baseline)
+      - name: Build x86_64 and aarch64 (glibc ${{ env.GLIBC_BASELINE }} baseline)
         run: |
-          cargo zigbuild --release --locked --target "x86_64-unknown-linux-gnu.$GLIBC_BASELINE"
-          cp target/x86_64-unknown-linux-gnu/release/taskdm target/release-taskdm
+          for arch in x86_64 aarch64; do
+            cargo zigbuild --release --locked --target "$arch-unknown-linux-gnu.$GLIBC_BASELINE"
+            cp "target/$arch-unknown-linux-gnu/release/taskdm" "target/release-taskdm-$arch"
+          done
 
-      - name: Check glibc requirement
+      - name: Check binaries
         run: |
-          need="$(grep -ao 'GLIBC_2\.[0-9.]*' target/release-taskdm | sort -Vu | tail -1)"
-          echo "Binary requires $need (baseline GLIBC_$GLIBC_BASELINE)"
-          [ "$(printf '%s\n%s\n' "$need" "GLIBC_$GLIBC_BASELINE" | sort -V | tail -1)" = "GLIBC_$GLIBC_BASELINE" ] \
-            || { echo "::error::binary needs $need, newer than GLIBC_$GLIBC_BASELINE"; exit 1; }
-          ./target/release-taskdm --version
-          ./target/release-taskdm --bench 50 | head -3
+          for arch in x86_64 aarch64; do
+            bin="target/release-taskdm-$arch"
+            need="$(grep -ao 'GLIBC_2\.[0-9.]*' "$bin" | sort -Vu | tail -1)"
+            echo "$arch binary requires $need (baseline GLIBC_$GLIBC_BASELINE)"
+            [ "$(printf '%s\n%s\n' "$need" "GLIBC_$GLIBC_BASELINE" | sort -V | tail -1)" = "GLIBC_$GLIBC_BASELINE" ] \
+              || { echo "::error::$arch binary needs $need, newer than GLIBC_$GLIBC_BASELINE"; exit 1; }
+          done
+          # ELF machine field: 0x3e = x86-64, 0xb7 = AArch64.
+          [ "$(od -An -tx1 -j18 -N1 target/release-taskdm-aarch64 | tr -d ' ')" = b7 ] \
+            || { echo "::error::aarch64 build isn't an AArch64 binary"; exit 1; }
+          ./target/release-taskdm-x86_64 --version
+          ./target/release-taskdm-x86_64 --bench 50 | head -3
 
       - name: Package
         run: |
           v="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          name="taskd-monitor-$v-x86_64-linux"
-          mkdir -p "dist/$name"
-          cp target/release-taskdm "dist/$name/taskdm"
-          cp packaging/taskd-monitor.desktop packaging/taskd-monitor.svg packaging/install.sh README.md LICENSE "dist/$name/"
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
-          TASKD_BIN=target/release-taskdm packaging/build-deb.sh dist
+          for arch in x86_64 aarch64; do
+            name="taskd-monitor-$v-$arch-linux"
+            mkdir -p "dist/$name"
+            cp "target/release-taskdm-$arch" "dist/$name/taskdm"
+            cp packaging/taskd-monitor.desktop packaging/taskd-monitor.svg packaging/install.sh README.md LICENSE "dist/$name/"
+            tar -C dist -czf "dist/$name.tar.gz" "$name"
+          done
+          TASKD_BIN=target/release-taskdm-x86_64 DEB_ARCH=amd64 packaging/build-deb.sh dist
+          TASKD_BIN=target/release-taskdm-aarch64 DEB_ARCH=arm64 packaging/build-deb.sh dist
           (cd dist && sha256sum ./*.tar.gz ./*.deb > SHA256SUMS)
+          packaging/aur/render.sh dist "$v"
           ls -la dist
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -83,6 +97,7 @@ jobs:
             dist/*.tar.gz
             dist/*.deb
             dist/SHA256SUMS
+            dist/PKGBUILD
           retention-days: 7
 
   publish:
@@ -123,3 +138,4 @@ jobs:
             dist/*.deb
             dist/SHA256SUMS
             dist/SHA256SUMS.sig
+            dist/PKGBUILD

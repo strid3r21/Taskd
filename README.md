@@ -4,7 +4,7 @@
 
 A fast, lightweight task manager for Linux. It's a single native binary that uses about 1% of one CPU core while open.
 
-It shows your apps, processes, performance graphs (CPU, memory, disks, network, GPU), users, systemd services and startup apps. It can also act as an **MCP server**, so a local AI agent can look through your system for performance problems.
+It shows your apps, processes, performance graphs (CPU, memory, disks, network, GPU, sensors), storage space, users, systemd services and startup apps, explains crashes and slowdowns, and can watch your other Linux machines over SSH. It can also act as an **MCP server**, so a local AI agent can look through your system for performance problems.
 
 ## Install
 
@@ -14,16 +14,19 @@ Paste this into a terminal. It needs no root and installs to `~/.local`:
 curl -fsSL https://raw.githubusercontent.com/strid3r21/Taskd/main/install.sh | sh
 ```
 
-It downloads the latest release, checks its signature and checksum, and adds Taskd to your app menu. You can [read the script](install.sh) first.
+It downloads the latest release for your CPU (x86_64 or ARM64), checks its signature and checksum, and adds Taskd to your app menu. You can [read the script](install.sh) first.
 
 Or download a file from the [Releases page](https://github.com/strid3r21/Taskd/releases):
 
 ```sh
-# Debian / Ubuntu / Mint
+# Debian / Ubuntu / Mint / Raspberry Pi OS (use the _arm64.deb on ARM)
 sudo apt install ./taskd-monitor_*_amd64.deb
 
+# Arch Linux and derivatives: download PKGBUILD from the release, then
+makepkg -si
+
 # Any distro (installs to ~/.local, no root needed)
-tar xzf taskd-monitor-*-x86_64-linux.tar.gz && ./taskd-monitor-*/install.sh
+tar xzf taskd-monitor-*-linux.tar.gz && ./taskd-monitor-*/install.sh
 ```
 
 Or build it from the git address with [Rust](https://rustup.rs). This installs only the command, with no app menu entry:
@@ -46,21 +49,30 @@ Taskd keeps itself up to date. Tarball installs update automatically at launch. 
 | --- | --- |
 | **Apps** | See running apps, Docker/Podman containers and VMs with their processes grouped together. End, kill, suspend or resume a whole app; stop or restart a container; **limit an app's memory and CPU** (right-click → Limit resources). |
 | **Processes** | See every process with CPU (plus a mini history graph and total CPU time), memory, GPU, disk, threads and state. Filter, sort, use tree view, change priority, send signals. Details show open files and network connections; **Find open file…** tells you which process is holding a file. |
-| **Performance** | Live graphs for CPU (per core too), memory, each disk, network interface, GPU and battery, plus the top 10 apps and services using each one. Drag the sidebar to resize or reorder it; right-click an item to rename or hide it. |
+| **Performance** | Live graphs for CPU (per core too, with each core's speed), memory, each disk, network interface, GPU and battery, plus the top 10 apps and services using each one. **Responsiveness** shows how much programs are *waiting* for the CPU, memory or disk, which is what you feel as lag. **Sensors** lists every temperature and fan sensor, plus CPU power draw and an estimate per app. Drag the sidebar to resize or reorder it; right-click an item to rename or hide it. |
+| **Storage** | Free space on each drive, and **What's using space?**: a folder-by-folder breakdown you can click into, largest first. |
 | **Users** | Resource use per user. Double-click a user to see their processes. |
 | **Services** | Right-click a systemd service to start, stop, restart, reload, pause/resume, enable or disable it, see its processes and logs, or limit its memory and CPU. |
 | **Startup** | Turn apps that launch at login on or off. |
+| **Timeline** | *Why did it die?* Crashes, apps killed for running out of memory (by the kernel, a memory limit or systemd-oomd) and failed services, over the last day to 90 days. They're also marked on the history graphs. |
+| **Machines** | Watch other Linux computers (a home server, a Raspberry Pi) in the same window over SSH: CPU, memory, responsiveness, temperatures, free space and their heaviest apps. Needs key-based SSH login and Taskd on the other machine; the **Install there** button can put it there for you. |
 | **Assistant** | Ask an AI about your system ("why is it slow?"). Works with local models (Ollama, LM Studio) and with Claude, ChatGPT, DeepSeek, OpenRouter or any OpenAI-compatible API. It looks at live data through the same tools as the MCP server; ending processes is off unless you allow it, and every action asks first. Also from a terminal: `taskdm --ask "…"`. |
 
-**History and alerts.** A small background recorder (a systemd user service, toggled in ⚙) keeps about a week of history. In the Performance tab, switch from **Live** to **1 h / 6 h / 24 h / 7 days** to see what happened while you were away; hover the graph to see which apps were running at that moment. The same recorder sends desktop **alerts** (low memory, CPU maxed out, overheating, a saturated disk, heavy swapping, a failed service, low battery, or an app over a memory limit you set), configurable under ⚙ → Alerts. You can mute notifications for 1, 8 or 24 hours or until you turn them back on, from ⚙ or the tray icon.
+**History and alerts.** A small background recorder (a systemd user service, toggled in ⚙) keeps about a week of history. In the Performance tab, switch from **Live** to **1 h / 6 h / 24 h / 7 days** to see what happened while you were away; hover the graph to see which apps were running at that moment. The same recorder sends desktop **alerts** (low memory, CPU maxed out, the computer struggling, an app crashing or being killed for lack of memory, overheating, a saturated disk, heavy swapping, a failed service, low battery, or an app over a memory limit you set), configurable under ⚙ → Alerts. You can mute notifications for 1, 8 or 24 hours or until you turn them back on, from ⚙ or the tray icon.
 
-**Per-app network usage** (and disk I/O of system services) is something Linux only shows to root. Turn on Taskd's optional helper under ⚙ → *Per-app network* (it asks for your password once). It's a small, sandboxed system service that reads only packet *headers* (the first 128 bytes, truncated in the kernel), attributes traffic to processes, and gives out nothing but per-process byte counts, and only to administrators.
+**Per-app network usage** (plus disk I/O of system services and CPU power draw) is something Linux only shows to root. Turn on Taskd's optional helper under ⚙ → *Per-app network* (it asks for your password once). It's a small, sandboxed system service that reads only packet *headers* (the first 128 bytes, truncated in the kernel), attributes traffic to processes, and gives out nothing but per-process byte counts, and only to administrators.
 
 **Tray icon** with a live CPU/memory graph; optionally keep Taskd running in the tray when you close the window (⚙).
 
+**Automatic rules** (⚙ → Automatic rules, or right-click an app): always give an app low or high priority, or cap its memory or CPU. The background recorder applies them within seconds of the app starting. **Game mode** gives your other apps low priority while a game or launcher you list (e.g. Steam) is running.
+
+**Keyboard shortcut:** set Ctrl+Shift+Esc (or Super+Esc) to open Taskd from ⚙ on Cinnamon, GNOME, KDE or Xfce. Launching Taskd again brings the open window to the front.
+
+**Share what's going on:** ⚙ → *System report…* makes a summary of your machine, its current state, heaviest apps, storage, failed services and recent crashes, ready to paste into a bug report or forum post (it leaves out your computer's name, user names and command lines). The history view has **Export CSV**. From a terminal: `taskdm --report` and `taskdm --export-history 24h`.
+
 Drag the top tabs to reorder them. The ⚙ menu has light/dark themes; window size and position are remembered.
 
-**Keyboard:** `Ctrl+1`–`6` switch tabs · `Ctrl+F` search · `Delete` / `Shift+Delete` end / kill · `Enter` details · `Ctrl+P` pause · `F5` refresh
+**Keyboard:** `Ctrl+1`–`9` switch tabs · `Ctrl+F` search · `Delete` / `Shift+Delete` end / kill · `Enter` details · `Ctrl+P` pause · `F5` refresh
 
 ## Use it with a local AI agent (MCP)
 
@@ -115,6 +127,7 @@ A good agent starts with `health_check`, then digs into the details.
 | `process_details` | Everything about one process, including its parents and children |
 | `resource_history` | How a resource has behaved over the last ~2 minutes |
 | `failed_services`, `service_logs` | Failed systemd services and their recent log lines |
+| `recent_events` | Crashes, out-of-memory kills and failed services from the journal (up to 30 days back) |
 
 ### Safety
 

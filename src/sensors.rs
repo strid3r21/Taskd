@@ -48,10 +48,26 @@ struct Rapl {
     prev: Option<u64>,
 }
 
+/// hwmon sensors. Some are slow to read (an NVMe temperature is an admin command to the
+/// drive, ~5-10 ms; some Wi-Fi chips take 20 ms), so they're read on their own thread and
+/// only while something shows them (see `want`), not on every sample.
 #[derive(Default)]
-pub struct SensorReader {
+struct Hwmon {
     sources: Vec<Source>,
     sensors: Vec<Sensor>,
+}
+
+/// When sensor values were last wanted (Unix seconds).
+static WANTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Ask for sensor readings for the next few seconds (call while showing them).
+pub fn want() {
+    WANTED.store(crate::recorder::epoch(), std::sync::atomic::Ordering::Relaxed);
+}
+
+#[derive(Default)]
+pub struct SensorReader {
+    feed: std::sync::Arc<std::sync::Mutex<Vec<Sensor>>>,
     rapl: Vec<Rapl>,
     rapl_direct: bool,
     psi: [Option<CachedFile>; 3],
@@ -156,11 +172,53 @@ impl SensorReader {
             ..Default::default()
         };
         r.rescan();
+        // The sensor thread ends when this reader is dropped.
+        let weak = std::sync::Arc::downgrade(&r.feed);
+        std::thread::spawn(move || {
+            let mut hw = Hwmon::default();
+            hw.rescan();
+            let mut buf = Vec::new();
+            let mut n = 0u32;
+            loop {
+                let Some(feed) = weak.upgrade() else { return };
+                let active =
+                    crate::recorder::epoch().saturating_sub(WANTED.load(std::sync::atomic::Ordering::Relaxed)) <= 10;
+                if active {
+                    hw.read(&mut buf);
+                }
+                *feed.lock().unwrap() = hw.sensors.clone();
+                drop(feed);
+                n += 1;
+                if n % 30 == 0 {
+                    hw.rescan(); // hotplug
+                }
+                std::thread::sleep(std::time::Duration::from_millis(if active { 2000 } else { 1000 }));
+            }
+        });
         r
     }
 
-    /// Find hwmon sensors and RAPL counters (cheap; also re-run for hotplug).
+    /// Find RAPL counters (cheap).
     pub fn rescan(&mut self) {
+        if self.rapl.is_empty() {
+            self.rapl = rapl_domains()
+                .into_iter()
+                .map(|(name, path, max_range)| Rapl {
+                    name,
+                    file: CachedFile::new(format!("{path}/energy_uj"), true),
+                    max_range,
+                    prev: None,
+                })
+                .collect();
+            let mut buf = Vec::new();
+            self.rapl_direct = self.rapl.iter_mut().any(|r| r.file.read_u64(&mut buf).is_some());
+        }
+    }
+}
+
+impl Hwmon {
+    /// Find hwmon sensors (cheap: directory listings, no sensor reads).
+    fn rescan(&mut self) {
         let mut found: Vec<(Sensor, String, f32)> = Vec::new();
         if let Ok(rd) = std::fs::read_dir("/sys/class/hwmon") {
             let mut dirs: Vec<_> = rd.flatten().map(|e| e.path()).collect();
@@ -219,30 +277,9 @@ impl SensorReader {
             self.sources.push(Source { file: CachedFile::new(path, true), scale });
             self.sensors.push(s);
         }
-
-        if self.rapl.is_empty() {
-            self.rapl = rapl_domains()
-                .into_iter()
-                .map(|(name, path, max_range)| Rapl {
-                    name,
-                    file: CachedFile::new(format!("{path}/energy_uj"), true),
-                    max_range,
-                    prev: None,
-                })
-                .collect();
-            let mut buf = Vec::new();
-            self.rapl_direct = self.rapl.iter_mut().any(|r| r.file.read_u64(&mut buf).is_some());
-        }
     }
 
-    /// Read everything. `helper_rapl`: energy counters from the root helper (RAPL is root-only
-    /// on current kernels). Returns the CPU package power in watts, if known.
-    pub fn read(
-        &mut self,
-        buf: &mut Vec<u8>,
-        elapsed: f64,
-        helper_rapl: Option<&std::collections::HashMap<String, u64>>,
-    ) -> Option<f32> {
+    fn read(&mut self, buf: &mut Vec<u8>) {
         for (src, s) in self.sources.iter_mut().zip(self.sensors.iter_mut()) {
             // Some sensors refuse reads while their device sleeps (EIO/ENODATA): show "—".
             s.value = src.file.read_u64(buf).map(|v| v as f32 / src.scale).filter(|v| v.is_finite());
@@ -252,7 +289,18 @@ impl SensorReader {
                 s.hist.push(v);
             }
         }
+    }
+}
 
+impl SensorReader {
+    /// Read everything. `helper_rapl`: energy counters from the root helper (RAPL is root-only
+    /// on current kernels). Returns the CPU package power in watts, if known.
+    pub fn read(
+        &mut self,
+        buf: &mut Vec<u8>,
+        elapsed: f64,
+        helper_rapl: Option<&std::collections::HashMap<String, u64>>,
+    ) -> Option<f32> {
         let mut watts = None::<f32>;
         for r in &mut self.rapl {
             let now =
@@ -289,8 +337,9 @@ impl SensorReader {
         watts
     }
 
-    pub fn sensors(&self) -> &[Sensor] {
-        &self.sensors
+    /// Latest readings from the sensor thread (values are None until wanted and read).
+    pub fn sensors(&self) -> Vec<Sensor> {
+        self.feed.lock().unwrap().clone()
     }
 
     pub fn has_rapl(&self) -> bool {
@@ -347,9 +396,15 @@ mod tests {
 
     #[test]
     fn reads_this_machine() {
+        want();
         let mut r = SensorReader::new();
         let mut buf = Vec::new();
         r.read(&mut buf, 1.0, None);
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let mut h = Hwmon::default();
+        h.rescan();
+        h.read(&mut buf);
+        assert_eq!(r.sensors().len(), h.sensors.len(), "feed thread found the same sensors");
         // PSI exists on any kernel since 4.20 with it enabled; sensors depend on hardware.
         if std::path::Path::new("/proc/pressure/memory").exists() {
             assert!(r.pressure.is_some());

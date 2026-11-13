@@ -5,7 +5,7 @@ set -eu
 cd "$(dirname "$0")/.."
 OUT="${1:-dist}"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+ARCH="${DEB_ARCH:-$(dpkg --print-architecture 2>/dev/null || echo amd64)}"
 ROOT="$(mktemp -d)"
 chmod 755 "$ROOT"
 trap 'rm -rf "$ROOT"' EXIT

@@ -12,6 +12,7 @@ mod limits;
 mod mcp;
 mod power;
 mod recorder;
+mod remote;
 mod report;
 mod rules;
 mod sampler;
@@ -26,6 +27,7 @@ mod ui_assistant;
 mod ui_events;
 mod ui_history;
 mod ui_limits;
+mod ui_machines;
 mod ui_performance;
 mod ui_processes;
 mod ui_rules;
@@ -48,6 +50,8 @@ OPTIONS:
     --bench [N]   Run the sampler N times (default 200) headless and print timings
     --once        Print one sample summary and exit
     --report      Print a shareable system report (Markdown)
+    --stream [MS] Print a JSON summary line every MS ms (default 2000); used by the
+                  Machines tab over SSH
     --export-history [1h|6h|24h|7d]
                   Print recorded history as CSV (default 24h)
     --update      Check for a new release and install it
@@ -62,7 +66,10 @@ OPTIONS:
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if matches!(args.first().map(String::as_str), Some("--bench" | "--once" | "--report" | "--export-history")) {
+    if matches!(
+        args.first().map(String::as_str),
+        Some("--bench" | "--once" | "--report" | "--export-history" | "--stream")
+    ) {
         // Text output may be piped into `head`: exit quietly on a closed pipe instead of panicking.
         // SAFETY: restoring the default disposition of SIGPIPE before any threads start.
         unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
@@ -73,6 +80,7 @@ fn main() {
         Some("--bench") => bench(args.get(1).and_then(|n| n.parse().ok()).unwrap_or(200)),
         Some("--once") => once(),
         Some("--report") => std::process::exit(report::cli()),
+        Some("--stream") => std::process::exit(remote::stream_cli(args.get(1).map(String::as_str))),
         Some("--export-history") => std::process::exit(report::export_cli(args.get(1).map(String::as_str))),
         Some("--update") => std::process::exit(updater::cli()),
         Some("--record") => std::process::exit(recorder::run()),

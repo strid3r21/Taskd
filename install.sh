@@ -25,7 +25,12 @@ fetch() {
 # Everything runs from here, so a download cut off midway through can't run half a script.
 main() {
     [ "$(uname -s)" = Linux ] || fail "Taskd only runs on Linux"
-    [ "$(uname -m)" = x86_64 ] || fail "releases are x86_64 only (this is $(uname -m)); see 'Building from source' in the README"
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64 | aarch64) ;;
+        arm64) arch=aarch64 ;;
+        *) fail "there are no release builds for $arch; see 'Building from source' in the README" ;;
+    esac
     for tool in curl tar sha256sum mktemp; do
         command -v "$tool" >/dev/null 2>&1 || fail "$tool is required"
     done
@@ -49,8 +54,8 @@ main() {
         *) echo "Warning: OpenSSL 3 not found, so the release signature was not checked" >&2 ;;
     esac
 
-    name=$(awk '{f=$2; sub(/^\*?(\.\/)?/, "", f)} f ~ /^taskd-monitor-[0-9.]+-x86_64-linux\.tar\.gz$/ {print f; exit}' "$dir/SHA256SUMS")
-    [ -n "$name" ] || fail "no Linux tarball is listed in this release"
+    name=$(awk -v a="$arch" '{f=$2; sub(/^\*?(\.\/)?/, "", f)} f ~ ("^taskd-monitor-[0-9.]+-" a "-linux\\.tar\\.gz$") {print f; exit}' "$dir/SHA256SUMS")
+    [ -n "$name" ] || fail "no $arch Linux tarball is listed in this release"
     expected=$(awk -v n="$name" '{f=$2; sub(/^\*?(\.\/)?/, "", f)} f == n {print $1; exit}' "$dir/SHA256SUMS")
 
     echo "Downloading $name"

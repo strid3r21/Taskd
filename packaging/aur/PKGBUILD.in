@@ -1,0 +1,28 @@
+# Maintainer: strid3r21 <strid3r21@users.noreply.github.com>
+# Generated for each release by packaging/aur/render.sh (attached to the GitHub release).
+pkgname=taskd-monitor-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='Fast, lightweight task manager for Linux (command: taskdm)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/strid3r21/Taskd'
+license=('MIT')
+depends=('glibc' 'libglvnd' 'hicolor-icon-theme')
+optdepends=('curl: update checks and the AI assistant'
+            'polkit: admin actions and the optional root helper'
+            'libnotify: alert notifications'
+            'openssh: watching other machines')
+provides=('taskd-monitor')
+conflicts=('taskd-monitor')
+source_x86_64=("$url/releases/download/v$pkgver/taskd-monitor-$pkgver-x86_64-linux.tar.gz")
+source_aarch64=("$url/releases/download/v$pkgver/taskd-monitor-$pkgver-aarch64-linux.tar.gz")
+sha256sums_x86_64=('@SHA_X86_64@')
+sha256sums_aarch64=('@SHA_AARCH64@')
+
+package() {
+    cd "taskd-monitor-$pkgver-$CARCH-linux"
+    install -Dm755 taskdm "$pkgdir/usr/bin/taskdm"
+    install -Dm644 taskd-monitor.desktop "$pkgdir/usr/share/applications/taskd-monitor.desktop"
+    install -Dm644 taskd-monitor.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/taskd-monitor.svg"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

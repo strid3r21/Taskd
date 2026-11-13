@@ -153,6 +153,7 @@ impl PerfState {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, c: &mut Ctx, procs: &mut ProcState) {
+        crate::sensors::want(); // hardware sensors are only read while they're on screen
         let s = c.snap.clone();
         // Clamp selection if a device disappeared.
         self.sel = match self.sel {
@@ -867,7 +868,8 @@ fn nice_pct(v: f32) -> f32 {
 }
 
 fn sensors_view(ui: &mut egui::Ui, s: &Snapshot, window: &str, title: &str) {
-    header(ui, title, &format!("Over {window}"));
+    let _ = window;
+    header(ui, title, "read every 2 s while shown");
     if let Some(w) = s.cpu.power_w {
         stats(ui, "power_stats", &[("CPU package power", format!("{w:.1} W"))]);
     } else if s.cpu.has_rapl {

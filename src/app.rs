@@ -31,10 +31,11 @@ pub enum Tab {
     Startup,
     Timeline,
     Storage,
+    Machines,
 }
 
 impl Tab {
-    const ALL: [Tab; 9] = [
+    const ALL: [Tab; 10] = [
         Tab::Apps,
         Tab::Processes,
         Tab::Performance,
@@ -43,6 +44,7 @@ impl Tab {
         Tab::Services,
         Tab::Startup,
         Tab::Timeline,
+        Tab::Machines,
         Tab::Assistant,
     ];
     fn label(self) -> &'static str {
@@ -56,6 +58,7 @@ impl Tab {
             Tab::Startup => "Startup",
             Tab::Timeline => "Timeline",
             Tab::Storage => "Storage",
+            Tab::Machines => "Machines",
         }
     }
     fn key(self) -> &'static str {
@@ -69,6 +72,7 @@ impl Tab {
             Tab::Startup => "startup",
             Tab::Timeline => "timeline",
             Tab::Storage => "storage",
+            Tab::Machines => "machines",
         }
     }
     fn from_key(k: &str) -> Tab {
@@ -95,6 +99,8 @@ pub enum JobResult {
     /// The desktop shortcut that opens Taskd (after checking or changing it).
     Shortcut(Option<String>, Option<Result<String, String>>),
     Scan(crate::storage::ScanResult),
+    /// Remote install finished (message).
+    Installed(String),
     History(crate::ui_history::Range, Vec<serde_json::Value>, Vec<crate::events::Event>),
     /// Timeline tab: (range index, events).
     Events(usize, Result<Vec<crate::events::Event>, String>),
@@ -195,6 +201,7 @@ pub struct App {
     startup: StartupState,
     events: crate::ui_events::EventsState,
     storage: crate::ui_storage::StorageState,
+    machines: crate::ui_machines::MachinesState,
     update: UpdateState,
     tab_drag: Option<Tab>,
     tray: Option<crate::tray::Tray>,
@@ -304,6 +311,7 @@ impl App {
             startup: StartupState::default(),
             events: Default::default(),
             storage: Default::default(),
+            machines: Default::default(),
             cfg,
             jobs,
             rx,
@@ -324,6 +332,11 @@ impl App {
                 JobResult::History(range, recs, ev) => self.perf.history.loaded(range, recs, ev),
                 JobResult::Events(range, res) => self.events.loaded(range, res),
                 JobResult::Scan(r) => self.storage.scanned(r),
+                JobResult::Installed(msg) => {
+                    self.machines.installed();
+                    let err = msg.starts_with("Couldn't");
+                    self.status = Some((msg, err, Instant::now()));
+                }
                 JobResult::Shortcut(cur, msg) => {
                     self.shortcut = Some(cur);
                     match msg {
@@ -1051,6 +1064,7 @@ impl eframe::App for App {
                 Tab::Startup => self.startup.ui(ui, &mut c),
                 Tab::Timeline => self.events.ui(ui, &mut c),
                 Tab::Storage => self.storage.ui(ui, &mut c),
+                Tab::Machines => self.machines.ui(ui, &mut c),
             }
         });
         if let Some(app) = open_rules {

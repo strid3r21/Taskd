@@ -127,6 +127,10 @@ settings! {
     alert_swap: bool = true;
     alert_battery_pct: f32 = 10.0f32, clamp 0.0, 90.0;
     alert_failed_services: bool = true;
+    /// Programs that crash or are killed for running out of memory.
+    alert_crashes: bool = true;
+    /// The system struggling (pressure stall) for 2 minutes.
+    alert_pressure: bool = true;
     /// Per-app memory limits: `App name=GB;App name=GB`.
     alert_app_mem: String = "";
     /// Alert notifications are muted until this time (Unix seconds); `u64::MAX` = until unmuted.

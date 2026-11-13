@@ -106,6 +106,9 @@ pub fn record(s: &Snapshot, g: &Grouper) -> Value {
         "disk": s.disks.iter().map(|d| (d.name.clone(), json!([r1(d.busy), d.read_rate.round(), d.write_rate.round()]))).collect::<serde_json::Map<_, _>>(),
         "net": s.nets.iter().map(|n| (n.name.clone(), json!([n.rx_rate.round(), n.tx_rate.round()]))).collect::<serde_json::Map<_, _>>(),
         "bat": s.batteries.first().map(|b| json!([r1(b.percent), b.power_w.map(r1)])),
+        // Pressure stall (some avg10): waiting for CPU, memory, disk.
+        "psi": s.pressure.as_ref().map(|p| json!([r1(p.cpu), r1(p.mem), r1(p.io)])),
+        "cpw": s.cpu.power_w.map(r1),
         "top": top,
     })
 }
@@ -176,13 +179,21 @@ pub struct Alerts {
     swap: VecDeque<(u64, f32)>,
     fired: HashMap<String, Instant>,
     last_service_check: Option<Instant>,
+    /// When the system started struggling (pressure stall), if it still is.
+    struggling_since: Option<u64>,
 }
 
 const COOLDOWN: Duration = Duration::from_secs(30 * 60);
 
 impl Alerts {
     pub fn new() -> Self {
-        Alerts { recent: VecDeque::new(), swap: VecDeque::new(), fired: HashMap::new(), last_service_check: None }
+        Alerts {
+            recent: VecDeque::new(),
+            swap: VecDeque::new(),
+            fired: HashMap::new(),
+            last_service_check: None,
+            struggling_since: None,
+        }
     }
 
     fn fire(&mut self, key: &str, title: &str, body: String, urgent: bool, out: &mut Vec<(String, String, bool)>) {
@@ -191,6 +202,18 @@ impl Alerts {
         }
         self.fired.insert(key.to_string(), Instant::now());
         out.push((title.to_string(), body, urgent));
+    }
+
+    /// A crash or out-of-memory kill seen in the journal (one alert per program per cooldown).
+    pub fn on_event(&mut self, e: &crate::events::Event, cfg: &Config) -> Option<(String, String, bool)> {
+        use crate::events::Kind;
+        if !cfg.alert_crashes || e.kind == Kind::ServiceFailed {
+            return None; // failed services have their own rule
+        }
+        let mut out = Vec::new();
+        let urgent = e.kind != Kind::Crash;
+        self.fire(&format!("ev:{}", e.name), &e.title, e.detail.clone(), urgent, &mut out);
+        out.pop()
     }
 
     /// Evaluate all rules; returns the notifications to show (title, body, urgent).
@@ -295,6 +318,21 @@ impl Alerts {
                     last.1,
                     top_mem()
                 ),
+                false,
+                &mut out,
+            );
+        }
+        let struggling = s.pressure.as_ref().filter(|p| p.level() == crate::sensors::Level::Struggling);
+        self.struggling_since = struggling.map(|_| self.struggling_since.unwrap_or(now));
+        if cfg.alert_pressure
+            && let (Some(p), Some(since)) = (struggling, self.struggling_since)
+            && now - since >= 120
+        {
+            let blame = if p.mem / 30.0 >= (p.io / 40.0).max(p.cpu / 70.0) { top_mem() } else { top_cpu() };
+            self.fire(
+                "psi",
+                "Your computer is struggling",
+                format!("{} for over 2 minutes. Biggest: {blame}", p.verdict().trim_start_matches("Struggling: ")),
                 false,
                 &mut out,
             );
@@ -411,6 +449,9 @@ pub fn run() -> i32 {
     // SAFETY: getuid never fails.
     let uid = unsafe { libc::getuid() };
     let mut alerts = Alerts::new();
+    // Crashes / OOM kills arrive from a journal follower thread.
+    let (ev_tx, ev_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || crate::events::follow(|e| drop(ev_tx.send(e))));
     let mut last_prune = None::<Instant>;
     eprintln!("taskdm recorder {} writing to {}", env!("CARGO_PKG_VERSION"), dir.display());
     loop {
@@ -428,7 +469,10 @@ pub fn run() -> i32 {
             let _ = writeln!(f, "{rec}");
         }
         // Rules keep running while muted (so cooldowns stay current); only the popups stop.
-        let fired = alerts.check(&snap, &grouper, &cfg);
+        let mut fired = alerts.check(&snap, &grouper, &cfg);
+        while let Ok(e) = ev_rx.try_recv() {
+            fired.extend(alerts.on_event(&e, &cfg));
+        }
         if !muted(&cfg, epoch()) {
             for (title, body, urgent) in fired {
                 notify(&title, &body, urgent);

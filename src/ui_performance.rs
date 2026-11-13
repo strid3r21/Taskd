@@ -10,6 +10,7 @@ use crate::config::Config;
 use crate::graph::{self, CPU, DISK, GPU, MEM, NET, Series, graph};
 use crate::groups::Group;
 use crate::sampler::{History, Snapshot};
+use crate::sensors::{Level, SensorKind};
 use crate::ui_apps::signal_many;
 use crate::ui_processes::ProcState;
 use crate::util::{fmt_bits, fmt_bytes, fmt_duration, fmt_rate};
@@ -23,6 +24,9 @@ enum Device {
     Net(usize),
     Gpu(usize),
     Battery(usize),
+    /// Pressure stall information: is the machine actually slow?
+    Pressure,
+    Sensors,
 }
 
 #[derive(Default)]
@@ -52,6 +56,8 @@ fn default_title(d: Device, s: &Snapshot) -> String {
                 "Battery".into()
             }
         }
+        Device::Pressure => "Responsiveness".into(),
+        Device::Sensors => "Sensors".into(),
     }
 }
 
@@ -101,16 +107,24 @@ fn device_key(d: Device, s: &Snapshot) -> String {
         Device::Net(i) => format!("net:{}", s.nets[i].name),
         Device::Gpu(i) => format!("gpu:{i}"),
         Device::Battery(i) => format!("bat:{}", s.batteries[i].name),
+        Device::Pressure => "psi".into(),
+        Device::Sensors => "sensors".into(),
     }
 }
 
 /// All devices in the user's order; ones not in the saved order keep their default place at the end.
 fn ordered_devices(s: &Snapshot, order: &str) -> Vec<(Device, String)> {
     let mut v: Vec<Device> = vec![Device::Cpu, Device::Mem];
+    if s.pressure.is_some() {
+        v.push(Device::Pressure);
+    }
     v.extend((0..s.disks.len()).map(Device::Disk));
     v.extend((0..s.nets.len()).map(Device::Net));
     v.extend((0..s.gpus.len()).map(Device::Gpu));
     v.extend((0..s.batteries.len()).map(Device::Battery));
+    if has_sensors(s) {
+        v.push(Device::Sensors);
+    }
     let pos: Vec<&str> = order.split(',').filter(|k| !k.is_empty()).collect();
     let mut keyed: Vec<(Device, String)> = v.into_iter().map(|d| (d, device_key(d, s))).collect();
     keyed.sort_by_key(|(_, k)| pos.iter().position(|p| p == k).unwrap_or(usize::MAX));
@@ -126,6 +140,18 @@ fn move_item(mut keys: Vec<String>, from: usize, target: usize) -> Vec<String> {
 }
 
 impl PerfState {
+    /// Select the `i`-th device in default order (tests); false when there is none.
+    #[cfg(test)]
+    pub fn select_nth(&mut self, s: &Snapshot, i: usize) -> bool {
+        match ordered_devices(s, "").get(i) {
+            Some((d, _)) => {
+                self.sel = *d;
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, c: &mut Ctx, procs: &mut ProcState) {
         let s = c.snap.clone();
         // Clamp selection if a device disappeared.
@@ -134,6 +160,8 @@ impl PerfState {
             Device::Net(i) if i >= s.nets.len() => Device::Cpu,
             Device::Gpu(i) if i >= s.gpus.len() => Device::Cpu,
             Device::Battery(i) if i >= s.batteries.len() => Device::Cpu,
+            Device::Pressure if s.pressure.is_none() => Device::Cpu,
+            Device::Sensors if !has_sensors(&s) => Device::Cpu,
             d => d,
         };
         // Never leave a hidden device selected.
@@ -177,6 +205,8 @@ impl PerfState {
                         Device::Net(i) => (Source::Net(&s.nets[i].name), NET),
                         Device::Gpu(i) => (Source::Gpu(i), GPU),
                         Device::Battery(_) => (Source::Battery, BATTERY),
+                        Device::Pressure => (Source::Pressure, PRESSURE),
+                        Device::Sensors => (Source::Sensors, SENSORS),
                     };
                     self.history.show(ui, c, src, &title, color);
                     return;
@@ -188,6 +218,8 @@ impl PerfState {
                     Device::Net(i) => net_view(ui, &s, i, &window, &title),
                     Device::Gpu(i) => gpu_view(ui, &s, i, &window, &title),
                     Device::Battery(i) => battery_view(ui, &s, i, &window, &title),
+                    Device::Pressure => pressure_view(ui, &s, &window, &title),
+                    Device::Sensors => sensors_view(ui, &s, &window, &title),
                 }
                 act = match self.sel {
                     Device::Cpu => top_list(ui, groups, &s, Metric::Cpu, CPU),
@@ -210,6 +242,23 @@ impl PerfState {
                             }
                         }
                     }
+                    // Who to blame depends on what everyone is waiting for.
+                    Device::Pressure => {
+                        let p = s.pressure.clone().unwrap_or_default();
+                        if p.mem / 30.0 >= (p.io / 40.0).max(p.cpu / 70.0) && p.mem > 1.0 {
+                            top_list(ui, groups, &s, Metric::Mem, MEM)
+                        } else if p.io / 40.0 >= p.cpu / 70.0 && p.io > 1.0 {
+                            top_list(ui, groups, &s, Metric::Disk, DISK)
+                        } else {
+                            top_list(ui, groups, &s, Metric::Cpu, CPU)
+                        }
+                    }
+                    Device::Sensors => match s.cpu.power_w {
+                        Some(w) if s.cpu.usage > 0.5 => {
+                            top_list(ui, groups, &s, Metric::Power(w as f64 / s.cpu.usage as f64), SENSORS)
+                        }
+                        _ => None,
+                    },
                     Device::Net(_) if s.helper.is_some() => top_list(ui, groups, &s, Metric::Net, NET),
                     Device::Net(_) => {
                         ui.add_space(14.0);
@@ -467,6 +516,26 @@ impl PerfState {
                 }
                 ("Battery".into(), sub, &b.hist, 100.0, BATTERY)
             }
+            Device::Pressure => {
+                let p = s.pressure.as_ref().expect("listed only with PSI");
+                let sub = p.verdict();
+                let short = sub.split(':').next().unwrap_or("").to_string();
+                ("Responsiveness".into(), short, &p.hist, 100.0, level_color(p.level()))
+            }
+            Device::Sensors => {
+                // The hottest temperature sensor stands in for the group.
+                let hot = s
+                    .sensors
+                    .iter()
+                    .filter(|x| x.kind == SensorKind::Temp)
+                    .max_by(|a, b| a.value.unwrap_or(0.0).total_cmp(&b.value.unwrap_or(0.0)));
+                let mut sub = hot.and_then(|h| h.value).map_or(String::new(), |v| format!("{v:.0} °C max"));
+                if let Some(w) = s.cpu.power_w {
+                    sub += &format!("  CPU {w:.0} W");
+                }
+                let hist = hot.map_or(&s.cpu.hist, |h| &h.hist);
+                ("Sensors".into(), sub, hist, 110.0, SENSORS)
+            }
         };
         let title = name.to_string(); // nickname or built-in name, from the caller
         let selected = self.sel == dev;
@@ -582,8 +651,12 @@ fn cpu_view(ui: &mut egui::Ui, s: &Snapshot, c: &mut Ctx, window: &str, title: &
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
                 for i in r * cols..((r + 1) * cols).min(n) {
-                    graph(ui, Vec2::new(cw, ch), &[Series::new(&cpu.core_hist[i], CPU)], 100.0, true)
-                        .on_hover_text(format!("CPU {i}: {:.0}%", cpu.per_core[i]));
+                    graph(ui, Vec2::new(cw, ch), &[Series::new(&cpu.core_hist[i], CPU)], 100.0, true).on_hover_text(
+                        match cpu.per_core_freq.get(i).filter(|f| **f > 0.0) {
+                            Some(f) => format!("CPU {i}: {:.0}% at {:.2} GHz", cpu.per_core[i], f / 1000.0),
+                            None => format!("CPU {i}: {:.0}%", cpu.per_core[i]),
+                        },
+                    );
                 }
             });
         }
@@ -602,6 +675,14 @@ fn cpu_view(ui: &mut egui::Ui, s: &Snapshot, c: &mut Ctx, window: &str, title: &
     }
     if let Some(t) = cpu.temp_c {
         items.push(("Temperature", format!("{t:.1} °C")));
+    }
+    if let Some(w) = cpu.power_w {
+        items.push(("Package power", format!("{w:.1} W")));
+    }
+    let freqs: Vec<f32> = cpu.per_core_freq.iter().copied().filter(|f| *f > 0.0).collect();
+    if freqs.len() > 1 {
+        let (lo, hi) = freqs.iter().fold((f32::MAX, 0f32), |(a, b), f| (a.min(*f), b.max(*f)));
+        items.push(("Speed range", format!("{:.2} – {:.2} GHz", lo / 1000.0, hi / 1000.0)));
     }
     items.extend([
         ("Processes", s.procs.len().to_string()),
@@ -733,6 +814,95 @@ fn gpu_view(ui: &mut egui::Ui, s: &Snapshot, i: usize, window: &str, title: &str
     }
     items.push(("Vendor", g.vendor.to_string()));
     stats(ui, "gpu_stats", &items);
+}
+
+const PRESSURE: Color32 = Color32::from_rgb(0x2c, 0xa0, 0x8c);
+const SENSORS: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x3c);
+
+fn level_color(l: Level) -> Color32 {
+    match l {
+        Level::Ok => PRESSURE,
+        Level::Slow => Color32::from_rgb(0xe0, 0xa8, 0x2e),
+        Level::Struggling => Color32::from_rgb(0xdd, 0x4b, 0x4b),
+    }
+}
+
+fn has_sensors(s: &Snapshot) -> bool {
+    !s.sensors.is_empty() || s.cpu.power_w.is_some()
+}
+
+fn pressure_view(ui: &mut egui::Ui, s: &Snapshot, window: &str, title: &str) {
+    let Some(p) = &s.pressure else { return };
+    header(ui, title, "");
+    ui.label(RichText::new(p.verdict()).size(18.0).strong().color(level_color(p.level())));
+    ui.label(
+        RichText::new(
+            "How much of the time programs had to wait for the CPU, memory or the disk (Linux pressure stall \
+             information, last 10 s). High usage alone isn't a problem; waiting is what you feel as lag.",
+        )
+        .weak(),
+    );
+    ui.add_space(6.0);
+    let w = ui.available_width();
+    let h = (w * 0.16).clamp(70.0, 140.0);
+    for (name, v, full, hist, col) in [
+        ("Waiting for the CPU", p.cpu, None, &p.cpu_hist, CPU),
+        ("Waiting for memory", p.mem, Some(p.mem_full), &p.mem_hist, MEM),
+        ("Waiting for the disk", p.io, Some(p.io_full), &p.io_hist, DISK),
+    ] {
+        let max = nice_pct(hist.max());
+        let right = match full {
+            Some(f) if f >= 0.5 => format!("{v:.1}%  (everything stalled {f:.1}%)"),
+            _ => format!("{v:.1}%"),
+        };
+        caption(ui, &format!("{name} over {window}"), &right);
+        graph(ui, Vec2::new(w, h), &[Series::new(hist, col)], max, true);
+        caption(ui, "", &format!("scale {max:.0}%"));
+    }
+}
+
+/// Graph ceiling for small percentages: 5, 10, 25, 50 or 100.
+fn nice_pct(v: f32) -> f32 {
+    [5.0, 10.0, 25.0, 50.0, 100.0].into_iter().find(|m| v <= *m).unwrap_or(100.0)
+}
+
+fn sensors_view(ui: &mut egui::Ui, s: &Snapshot, window: &str, title: &str) {
+    header(ui, title, &format!("Over {window}"));
+    if let Some(w) = s.cpu.power_w {
+        stats(ui, "power_stats", &[("CPU package power", format!("{w:.1} W"))]);
+    } else if s.cpu.has_rapl {
+        ui.label(
+            RichText::new(
+                "CPU power draw is readable only by root. Turn on (or update) Taskd's helper under ⚙ → Per-app network \
+                 to see it.",
+            )
+            .weak(),
+        );
+    }
+    let mut chip = "";
+    egui::Grid::new("sensors").num_columns(5).spacing([16.0, 4.0]).striped(true).show(ui, |ui| {
+        for x in &s.sensors {
+            if x.chip != chip {
+                chip = &x.chip;
+                ui.label(RichText::new(chip).strong());
+                ui.end_row();
+            }
+            ui.label(format!("   {}", x.label));
+            ui.label(RichText::new(x.value.map_or("—".into(), |v| x.kind.fmt(v))).strong());
+            let range =
+                if x.min <= x.max { format!("{} – {}", x.kind.fmt(x.min), x.kind.fmt(x.max)) } else { String::new() };
+            ui.label(RichText::new(range).small().weak());
+            let max = match x.kind {
+                SensorKind::Temp => 110.0,
+                _ => (x.hist.max() * 1.2).max(1.0),
+            };
+            graph(ui, Vec2::new(120.0, 22.0), &[Series::new(&x.hist, SENSORS)], max, false);
+            ui.end_row();
+        }
+    });
+    if s.sensors.is_empty() {
+        ui.label(RichText::new("No temperature or fan sensors are exposed on this machine.").weak());
+    }
 }
 
 #[derive(Clone, Copy)]

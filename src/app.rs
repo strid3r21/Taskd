@@ -29,11 +29,22 @@ pub enum Tab {
     Users,
     Services,
     Startup,
+    Timeline,
+    Storage,
 }
 
 impl Tab {
-    const ALL: [Tab; 7] =
-        [Tab::Apps, Tab::Processes, Tab::Performance, Tab::Users, Tab::Services, Tab::Startup, Tab::Assistant];
+    const ALL: [Tab; 9] = [
+        Tab::Apps,
+        Tab::Processes,
+        Tab::Performance,
+        Tab::Storage,
+        Tab::Users,
+        Tab::Services,
+        Tab::Startup,
+        Tab::Timeline,
+        Tab::Assistant,
+    ];
     fn label(self) -> &'static str {
         match self {
             Tab::Apps => "Apps",
@@ -43,6 +54,8 @@ impl Tab {
             Tab::Users => "Users",
             Tab::Services => "Services",
             Tab::Startup => "Startup",
+            Tab::Timeline => "Timeline",
+            Tab::Storage => "Storage",
         }
     }
     fn key(self) -> &'static str {
@@ -54,6 +67,8 @@ impl Tab {
             Tab::Users => "users",
             Tab::Services => "services",
             Tab::Startup => "startup",
+            Tab::Timeline => "timeline",
+            Tab::Storage => "storage",
         }
     }
     fn from_key(k: &str) -> Tab {
@@ -76,7 +91,11 @@ pub enum JobResult {
     ServiceLogs(String, Result<String, String>),
     /// "Find open file" results: matches and how many processes couldn't be inspected.
     FileHolders(Vec<crate::files::Holder>, usize),
-    History(crate::ui_history::Range, Vec<serde_json::Value>),
+    Report(String),
+    Scan(crate::storage::ScanResult),
+    History(crate::ui_history::Range, Vec<serde_json::Value>, Vec<crate::events::Event>),
+    /// Timeline tab: (range index, events).
+    Events(usize, Result<Vec<crate::events::Event>, String>),
     /// Background recorder enabled/disabled (or the error).
     Recorder(Result<bool, String>),
     Ai(crate::ui_assistant::AiMsg),
@@ -129,6 +148,12 @@ pub struct Jobs {
 }
 
 impl Jobs {
+    #[cfg(test)]
+    pub fn for_test(ctx: &egui::Context) -> (Jobs, std::sync::mpsc::Receiver<JobResult>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (Jobs { tx, ctx: ctx.clone() }, rx)
+    }
+
     /// Send a result from any thread (for workers that report progress before finishing).
     pub fn send(&self, r: JobResult) {
         let _ = self.tx.send(r);
@@ -164,6 +189,8 @@ pub struct App {
     users: UsersState,
     services: ServicesState,
     startup: StartupState,
+    events: crate::ui_events::EventsState,
+    storage: crate::ui_storage::StorageState,
     update: UpdateState,
     tab_drag: Option<Tab>,
     tray: Option<crate::tray::Tray>,
@@ -176,6 +203,8 @@ pub struct App {
     /// Recorder state last applied to the systemd user service (None = not yet this session).
     recorder_applied: Option<bool>,
     alerts_open: bool,
+    /// System report window: None = closed, Some(None) = being generated.
+    report: Option<Option<String>>,
     /// Window geometry waiting to be saved once it has been stable for a moment.
     geom_pending: Option<(String, Instant)>,
 }
@@ -240,6 +269,7 @@ impl App {
             quitting: false,
             recorder_applied: None,
             alerts_open: false,
+            report: None,
             geom_pending: None,
             shared,
             snap,
@@ -253,6 +283,8 @@ impl App {
             users: UsersState::default(),
             services: ServicesState::default(),
             startup: StartupState::default(),
+            events: Default::default(),
+            storage: Default::default(),
             cfg,
             jobs,
             rx,
@@ -270,7 +302,14 @@ impl App {
                 JobResult::Services(user, res) => self.services.loaded(user, res),
                 JobResult::ServiceLogs(unit, res) => self.services.logs_loaded(unit, res),
                 JobResult::FileHolders(found, denied) => self.procs.holders_loaded(found, denied),
-                JobResult::History(range, recs) => self.perf.history.loaded(range, recs),
+                JobResult::History(range, recs, ev) => self.perf.history.loaded(range, recs, ev),
+                JobResult::Events(range, res) => self.events.loaded(range, res),
+                JobResult::Scan(r) => self.storage.scanned(r),
+                JobResult::Report(text) => {
+                    if self.report.is_some() {
+                        self.report = Some(Some(text));
+                    }
+                }
                 JobResult::Ai(m) => self.assistant.on_msg(m),
                 JobResult::Recorder(Ok(on)) => self.recorder_applied = Some(on),
                 JobResult::Recorder(Err(e)) => {
@@ -390,6 +429,60 @@ impl App {
         });
     }
 
+    fn open_report(&mut self) {
+        self.report = Some(None);
+        let snap = self.snap.clone();
+        let uid = self.my_uid;
+        self.jobs.spawn(move || {
+            let mut g = crate::groups::Grouper::default();
+            g.prime_container_names();
+            g.update(&snap, uid);
+            JobResult::Report(crate::report::build(&snap, &g))
+        });
+    }
+
+    fn report_window(&mut self, ctx: &egui::Context) {
+        let Some(state) = &mut self.report else { return };
+        let mut open = true;
+        let mut status = None;
+        egui::Window::new("System report").open(&mut open).default_size([640.0, 520.0]).show(ctx, |ui| {
+            let Some(text) = state else {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Collecting…");
+                });
+                return;
+            };
+            ui.label(
+                RichText::new(
+                    "For bug reports and forum posts. It leaves out your computer's name, user names and command lines.",
+                )
+                .weak(),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Copy").clicked() {
+                    ui.ctx().copy_text(text.clone());
+                    status = Some(("Report copied".to_string(), false));
+                }
+                if ui.button("Save to Downloads").clicked() {
+                    status = Some(match crate::report::save_to_downloads("taskd-report", "md", text) {
+                        Ok(p) => (format!("Saved {}", p.display()), false),
+                        Err(e) => (format!("Couldn't save: {e}"), true),
+                    });
+                }
+            });
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                ui.add(egui::TextEdit::multiline(&mut text.as_str()).code_editor().desired_width(f32::INFINITY));
+            });
+        });
+        if !open {
+            self.report = None;
+        }
+        if let Some((m, err)) = status {
+            self.status = Some((m, err, Instant::now()));
+        }
+    }
+
     fn alerts_window(&mut self, ctx: &egui::Context) {
         if !self.alerts_open {
             return;
@@ -429,6 +522,8 @@ impl App {
             });
             ui.checkbox(&mut c.alert_swap, "When the system starts swapping heavily");
             ui.checkbox(&mut c.alert_failed_services, "When a systemd service fails");
+            ui.checkbox(&mut c.alert_crashes, "When an app crashes or is killed for running out of memory");
+            ui.checkbox(&mut c.alert_pressure, "When the computer is struggling (programs waiting) for 2 minutes");
             ui.separator();
             ui.label(RichText::new("Per-app memory limits").strong());
             let mut limits: Vec<(String, String)> = c
@@ -473,7 +568,7 @@ impl App {
 
     /// Per-app network & service I/O: the optional privileged helper.
     fn helper_controls(&mut self, ui: &mut egui::Ui, kind: &updater::InstallKind) {
-        ui.label(RichText::new("Per-app network & service disk I/O").strong());
+        ui.label(RichText::new("Per-app network, service disk I/O & CPU power").strong());
         let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         let deb = *kind == updater::InstallKind::Deb;
         let run = |jobs: &Jobs, args: Vec<String>, done: &'static str| {
@@ -591,6 +686,10 @@ impl App {
                 .on_hover_text("A small user service (taskdm --record) keeps ~7 days of history and raises alerts, even with this window closed.");
             if ui.button("Alerts…").clicked() {
                 self.alerts_open = true;
+                ui.close();
+            }
+            if ui.button("System report…").on_hover_text("A shareable summary of this machine and its state").clicked() {
+                self.open_report();
                 ui.close();
             }
             mute_controls(ui, &mut self.cfg);
@@ -759,7 +858,8 @@ impl App {
             let mut tab = None;
             if i.modifiers.command {
                 let order = Tab::ordered(&self.cfg.tab_order);
-                let keys = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7];
+                let keys =
+                    [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
                 for (n, k) in keys.into_iter().enumerate() {
                     if i.key_pressed(k) {
                         tab = order.get(n).copied();
@@ -779,6 +879,8 @@ impl App {
             match self.tab {
                 Tab::Services => self.services.request_reload(),
                 Tab::Startup => self.startup.request_reload(),
+                Tab::Timeline => self.events.request_reload(),
+                Tab::Storage => self.storage.request_reload(),
                 _ => {}
             }
         }
@@ -868,6 +970,8 @@ impl eframe::App for App {
                 Tab::Users => self.users.ui(ui, &mut c, &mut self.procs),
                 Tab::Services => self.services.ui(ui, &mut c, &mut self.procs),
                 Tab::Startup => self.startup.ui(ui, &mut c),
+                Tab::Timeline => self.events.ui(ui, &mut c),
+                Tab::Storage => self.storage.ui(ui, &mut c),
             }
         });
         if let Some(t) = switch_to {
@@ -880,6 +984,7 @@ impl eframe::App for App {
         self.track_geometry(&ctx);
         self.apply_recorder();
         self.alerts_window(&ctx);
+        self.report_window(&ctx);
         if self.cfg != self.saved {
             self.cfg.save();
             self.saved = self.cfg.clone();

@@ -63,6 +63,8 @@ pub enum Source<'a> {
     Net(&'a str),
     Gpu(usize),
     Battery,
+    Pressure,
+    Sensors,
 }
 
 /// Which per-app number in a recorded `top` entry belongs to a graph.
@@ -81,7 +83,8 @@ impl Res {
     fn of(src: &Source) -> Res {
         match src {
             // No per-app power figure exists; CPU is what drains a battery.
-            Source::Cpu | Source::Battery => Res::Cpu,
+            Source::Cpu | Source::Battery | Source::Sensors => Res::Cpu,
+            Source::Pressure => Res::Cpu,
             Source::Mem => Res::Mem,
             Source::Gpu(_) => Res::Gpu,
             Source::Disk(_) => Res::Io,
@@ -154,6 +157,8 @@ fn top_by(rec: &Value, res: Res) -> Vec<(&str, f64)> {
 pub struct HistoryView {
     pub range: Range,
     records: Vec<Value>,
+    /// Crashes / OOM kills / failed services in the same period, marked on the graph.
+    events: Vec<crate::events::Event>,
     loaded: Option<(Range, Instant)>,
     loading: bool,
 }
@@ -161,10 +166,11 @@ pub struct HistoryView {
 const MAX_POINTS: usize = 360;
 
 impl HistoryView {
-    pub fn loaded(&mut self, range: Range, records: Vec<Value>) {
+    pub fn loaded(&mut self, range: Range, records: Vec<Value>, events: Vec<crate::events::Event>) {
         self.loading = false;
         if range == self.range {
             self.records = records;
+            self.events = events;
             self.loaded = Some((range, Instant::now()));
         }
     }
@@ -192,7 +198,8 @@ impl HistoryView {
         let range = self.range;
         c.jobs.spawn(move || {
             let since = recorder::epoch().saturating_sub(range.secs());
-            JobResult::History(range, recorder::load(since))
+            let ev = crate::events::load(since).unwrap_or_default();
+            JobResult::History(range, recorder::load(since), ev)
         });
     }
 
@@ -203,6 +210,19 @@ impl HistoryView {
             if self.loading {
                 ui.spinner();
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(!self.records.is_empty(), egui::Button::new("Export CSV"))
+                    .on_hover_text("Save this period's history (all devices) to your Downloads folder")
+                    .clicked()
+                {
+                    let name = format!("taskd-history-{}", self.range.key());
+                    match crate::report::save_to_downloads(&name, "csv", &crate::report::history_csv(&self.records)) {
+                        Ok(p) => c.info(format!("Saved {}", p.display())),
+                        Err(e) => c.error(format!("Couldn't save: {e}")),
+                    }
+                }
+            });
         });
         if self.records.is_empty() {
             ui.add_space(12.0);
@@ -231,6 +251,13 @@ impl HistoryView {
             ),
             Source::Gpu(i) => (vec![self.pick(|r| r["gpu"][i][0].as_f64())], "%", false),
             Source::Battery => (vec![self.pick(|r| r["bat"][0].as_f64())], "%", false),
+            Source::Pressure => ((0..3).map(|k| self.pick(|r| r["psi"][k].as_f64())).collect(), "%", false),
+            Source::Sensors => (vec![self.pick(|r| r["ctemp"].as_f64())], "°C", false),
+        };
+        // Pressure: one line per resource, in that resource's color.
+        let colors: Vec<Color32> = match src {
+            Source::Pressure => vec![crate::graph::CPU, crate::graph::MEM, crate::graph::DISK],
+            _ => vec![color; series.len()],
         };
         let times: Vec<u64> = self.records.iter().map(|r| r["t"].as_u64().unwrap_or(0)).collect();
         let buckets = times.len().clamp(1, MAX_POINTS);
@@ -244,33 +271,84 @@ impl HistoryView {
                 .collect()
         };
         let ds: Vec<Vec<f32>> = series.iter().map(|s| down(s)).collect();
-        let max = if unit == "%" { 100.0 } else { ds.iter().flatten().copied().fold(1.0, f32::max) * 1.15 };
+        let peak = ds.iter().flatten().copied().fold(1.0, f32::max);
+        let max = match (unit, &src) {
+            // Waits are usually small: zoom in instead of flattening them against 100%.
+            ("%", Source::Pressure) => [5.0, 10.0, 25.0, 50.0, 100.0].into_iter().find(|m| peak <= *m).unwrap_or(100.0),
+            ("%", _) => 100.0,
+            ("°C", _) => 110.0,
+            _ => peak * 1.15,
+        };
+        let fmt_v = |v: f32| match unit {
+            "%" => format!("{v:.0}%"),
+            "°C" => format!("{v:.0} °C"),
+            _ => fmt_rate(v as f64),
+        };
         let span = |t: u64| fmt_time(t, self.range.secs() > 86_400);
         ui.horizontal(|ui| {
             ui.label(RichText::new(span(*times.first().unwrap_or(&0))).small().weak());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let top = if unit == "%" { "100%".to_string() } else { fmt_rate(max as f64) };
+                let top = fmt_v(max);
                 ui.label(RichText::new(format!("{top}   now")).small().weak());
             });
         });
         let w = ui.available_width();
         let sets: Vec<(&[f32], Color32, bool)> =
-            ds.iter().enumerate().map(|(i, s)| (s.as_slice(), color, dashed2 && i == 1)).collect();
+            ds.iter().enumerate().map(|(i, s)| (s.as_slice(), colors[i], dashed2 && i == 1)).collect();
         let (resp, hover) = graph_series(ui, Vec2::new(w, (w * 0.4).clamp(160.0, 360.0)), &sets, max);
         if unit == "B/s" {
             ui.label(RichText::new("solid: receive · dashed: send").small().weak());
         }
+        if matches!(src, Source::Pressure) {
+            ui.label(RichText::new("Time spent waiting for:  blue CPU · purple memory · green disk").small().weak());
+        }
+        if matches!(src, Source::Sensors) {
+            ui.label(RichText::new("CPU temperature").small().weak());
+        }
+        // Crash / out-of-memory markers along the top edge (failed services are left to the Timeline).
+        let (t0, t1) = (times.first().copied().unwrap_or(0), times.last().copied().unwrap_or(0));
+        let marked: Vec<&crate::events::Event> = self
+            .events
+            .iter()
+            .filter(|e| e.kind != crate::events::Kind::ServiceFailed && e.t >= t0 && e.t <= t1)
+            .collect();
+        let bucket_of = |t: u64| {
+            let i = times.partition_point(|x| *x < t).min(times.len() - 1);
+            i * buckets / times.len()
+        };
+        if !marked.is_empty() {
+            let r = resp.rect;
+            let step = r.width() / (buckets.max(2) - 1) as f32;
+            let p = ui.painter_at(r);
+            for e in &marked {
+                let x = r.left() + step * bucket_of(e.t) as f32;
+                let col = crate::ui_events::kind_color(e.kind);
+                p.vline(x, r.y_range(), egui::Stroke::new(1.0, col.gamma_multiply(0.5)));
+                p.add(egui::Shape::convex_polygon(
+                    vec![egui::pos2(x - 4.0, r.top()), egui::pos2(x + 4.0, r.top()), egui::pos2(x, r.top() + 6.0)],
+                    col,
+                    egui::Stroke::NONE,
+                ));
+            }
+        }
         // Tooltip: time, value, and what was running then.
         if let Some(b) = hover {
+            let near: Vec<&&crate::events::Event> = marked.iter().filter(|e| bucket_of(e.t).abs_diff(b) <= 1).collect();
             let i = (b * times.len() / buckets).min(times.len() - 1);
             let rec = &self.records[i];
-            let value = ds.iter().map(|s| if unit == "%" { format!("{:.0}%", s[b]) } else { fmt_rate(s[b] as f64) });
+            let value = ds.iter().map(|s| fmt_v(s[b]));
             let value = value.collect::<Vec<_>>().join(" / ");
             let res = Res::of(&src);
             let apps = top_by(rec, res);
             let recorded = rec["top"].as_array().into_iter().flatten().any(|e| res.get(e).is_some());
             resp.on_hover_ui_at_pointer(|ui| {
                 ui.label(RichText::new(format!("{}  ·  {value}", fmt_time(times[i], true))).strong());
+                for e in &near {
+                    ui.colored_label(
+                        crate::ui_events::kind_color(e.kind),
+                        format!("{}  {}", fmt_time(e.t, false), e.title),
+                    );
+                }
                 if apps.is_empty() {
                     ui.label(RichText::new(res.none_text(recorded)).weak());
                 }
@@ -286,7 +364,7 @@ impl HistoryView {
         let s0 = &series[0];
         let (mn, mx) = s0.iter().fold((f32::MAX, f32::MIN), |(a, b), &x| (a.min(x), b.max(x)));
         let avg = s0.iter().sum::<f32>() / s0.len().max(1) as f32;
-        let f = |v: f32| if unit == "%" { format!("{v:.0}%") } else { fmt_rate(v as f64) };
+        let f = fmt_v;
         ui.label(format!("Average {}  ·  peak {}  ·  low {}  ·  {} samples", f(avg), f(mx), f(mn), s0.len()));
         self.top_during(ui, &src);
     }

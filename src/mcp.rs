@@ -152,6 +152,16 @@ impl Server {
                 "annotations": ro,
             }),
             json!({
+                "name": "recent_events",
+                "title": "Recent crashes and kills",
+                "description": "Crashes (core dumps), programs killed for running out of memory (by the kernel, a memory limit, or systemd-oomd) and failed services from the system journal, newest first. Use it to answer why an app disappeared or what went wrong earlier.",
+                "inputSchema": {"type": "object", "properties": {
+                    "hours": {"type": "number", "description": "How far back to look (default 24, max 720)."},
+                    "kind": {"type": "string", "enum": ["crash", "out_of_memory", "service_failed"], "description": "Only this kind."},
+                }},
+                "annotations": ro,
+            }),
+            json!({
                 "name": "system_overview",
                 "title": "System overview",
                 "description": "Current CPU, memory/swap, disks, network, GPUs, load average, uptime and process/thread counts.",
@@ -266,6 +276,7 @@ impl Server {
             "process_details" => self.process_details(args),
             "resource_history" => self.history(args),
             "failed_services" => Ok(failed_services()),
+            "recent_events" => recent_events(args),
             "service_logs" => service_logs(args),
             "signal_process" | "set_priority" if !self.allow_actions => {
                 Err("process actions are disabled; start the server with --mcp-allow-actions".into())
@@ -351,6 +362,7 @@ impl Server {
                 "frequency_ghz": s.cpu.freq_mhz.map(|f| round2(f / 1000.0)),
                 "temperature_c": s.cpu.temp_c.map(round1),
                 "load_average_1_5_15": s.load,
+                "package_power_w": s.cpu.power_w.map(round1),
                 "context_switches_per_s": s.cpu.ctxt_rate.round(),
             },
             "memory": {
@@ -368,6 +380,15 @@ impl Server {
                 "interface": n.name, "receive": fmt_rate(n.rx_rate), "send": fmt_rate(n.tx_rate),
                 "link_mbps": n.speed_mbps,
             })).collect::<Vec<_>>(),
+            "pressure_stall_percent_last_10s": s.pressure.as_ref().map(|p| json!({
+                "verdict": p.verdict(),
+                "waiting_for_cpu": round1(p.cpu), "waiting_for_memory": round1(p.mem),
+                "all_stalled_on_memory": round1(p.mem_full), "waiting_for_disk": round1(p.io),
+                "all_stalled_on_disk": round1(p.io_full),
+            })),
+            "sensors": s.sensors.iter().filter_map(|x| Some(json!({
+                "chip": x.chip, "label": x.label, "value": x.kind.fmt(x.value?),
+            }))).collect::<Vec<_>>(),
             "gpus": s.gpus.iter().enumerate().map(|(i, g)| json!({
                 "index": i, "name": g.name, "usage_percent": g.util.map(round1),
                 "memory_used": g.mem_used.map(fmt_bytes), "memory_total": g.mem_total.map(fmt_bytes),
@@ -724,6 +745,47 @@ impl Server {
             );
         }
 
+        // Pressure stall: the direct measure of "programs are waiting" (felt as lag).
+        if let Some(p) = &s.pressure {
+            use crate::sensors::Level;
+            let sev = match p.level() {
+                Level::Ok => None,
+                Level::Slow => Some("warning"),
+                Level::Struggling => Some("critical"),
+            };
+            if let Some(sev) = sev {
+                let res = if p.mem / 30.0 >= (p.io / 40.0).max(p.cpu / 70.0) {
+                    "memory"
+                } else if p.io / 40.0 >= p.cpu / 70.0 {
+                    "disk"
+                } else {
+                    "cpu"
+                };
+                add(
+                    sev,
+                    "pressure",
+                    p.verdict(),
+                    json!({
+                        "waiting_for_cpu_percent": round1(p.cpu), "waiting_for_memory_percent": round1(p.mem),
+                        "waiting_for_disk_percent": round1(p.io), "top": top(res, 5),
+                    }),
+                );
+            }
+        }
+        // Crashes and out-of-memory kills in the last hour.
+        if let Ok(ev) = crate::events::load(crate::recorder::epoch().saturating_sub(3600)) {
+            let bad: Vec<&crate::events::Event> =
+                ev.iter().filter(|e| e.kind != crate::events::Kind::ServiceFailed).collect();
+            if !bad.is_empty() {
+                add(
+                    "warning",
+                    "crashes",
+                    format!("{} crash/out-of-memory event(s) in the last hour", bad.len()),
+                    json!({"events": bad.iter().rev().take(10).map(|e| event_json(e)).collect::<Vec<_>>()}),
+                );
+            }
+        }
+
         let worst = if f.iter().any(|x| x["severity"] == "critical") {
             "critical"
         } else if f.iter().any(|x| x["severity"] == "warning") {
@@ -883,7 +945,33 @@ fn summarize(name: String, unit: &str, h: &History, interval: f64) -> Value {
     })
 }
 
-fn failed_services() -> Value {
+fn event_json(e: &crate::events::Event) -> Value {
+    json!({"time": crate::ui_history::fmt_time(e.t, true), "unix_time": e.t, "type": e.kind.label(),
+           "what": e.title, "detail": e.detail})
+}
+
+fn recent_events(args: &Value) -> Result<Value, String> {
+    use crate::events::Kind;
+    let hours = args["hours"].as_f64().unwrap_or(24.0).clamp(0.1, 720.0);
+    let since = crate::recorder::epoch().saturating_sub((hours * 3600.0) as u64);
+    let want = args["kind"].as_str();
+    let ev = crate::events::load(since)?;
+    let list: Vec<Value> = ev
+        .iter()
+        .rev()
+        .filter(|e| match want {
+            Some("crash") => e.kind == Kind::Crash,
+            Some("out_of_memory") => matches!(e.kind, Kind::OomKill | Kind::LimitKill | Kind::Oomd),
+            Some("service_failed") => e.kind == Kind::ServiceFailed,
+            _ => true,
+        })
+        .take(100)
+        .map(event_json)
+        .collect();
+    Ok(json!({"hours": hours, "count": list.len(), "events": list}))
+}
+
+pub fn failed_services() -> Value {
     let mut failed = Vec::new();
     for user in [false, true] {
         let mut cmd = Command::new("systemctl");

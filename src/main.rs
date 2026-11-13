@@ -2,6 +2,7 @@ mod actions;
 mod ai;
 mod app;
 mod config;
+mod events;
 mod files;
 mod gpu;
 mod graph;
@@ -11,16 +12,23 @@ mod limits;
 mod mcp;
 mod power;
 mod recorder;
+mod report;
 mod sampler;
+mod sensors;
 mod services;
 mod startup;
+mod storage;
 mod tray;
 mod ui_apps;
 mod ui_assistant;
+mod ui_events;
 mod ui_history;
 mod ui_limits;
 mod ui_performance;
 mod ui_processes;
+#[cfg(test)]
+mod ui_smoke_tests;
+mod ui_storage;
 mod ui_tabs;
 mod updater;
 mod util;
@@ -36,6 +44,9 @@ USAGE:
 OPTIONS:
     --bench [N]   Run the sampler N times (default 200) headless and print timings
     --once        Print one sample summary and exit
+    --report      Print a shareable system report (Markdown)
+    --export-history [1h|6h|24h|7d]
+                  Print recorded history as CSV (default 24h)
     --update      Check for a new release and install it
     --ask <q>     Ask the configured AI assistant a question from the terminal
     --record      Background recorder for history and alerts (normally run as a user service)
@@ -48,7 +59,7 @@ OPTIONS:
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if matches!(args.first().map(String::as_str), Some("--bench" | "--once")) {
+    if matches!(args.first().map(String::as_str), Some("--bench" | "--once" | "--report" | "--export-history")) {
         // Text output may be piped into `head`: exit quietly on a closed pipe instead of panicking.
         // SAFETY: restoring the default disposition of SIGPIPE before any threads start.
         unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
@@ -58,6 +69,8 @@ fn main() {
         Some("-V" | "--version") => println!("taskdm {}", env!("CARGO_PKG_VERSION")),
         Some("--bench") => bench(args.get(1).and_then(|n| n.parse().ok()).unwrap_or(200)),
         Some("--once") => once(),
+        Some("--report") => std::process::exit(report::cli()),
+        Some("--export-history") => std::process::exit(report::export_cli(args.get(1).map(String::as_str))),
         Some("--update") => std::process::exit(updater::cli()),
         Some("--record") => std::process::exit(recorder::run()),
         Some("--helper") => std::process::exit(helper::run()),

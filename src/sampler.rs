@@ -90,7 +90,13 @@ pub struct CpuInfo {
     pub iowait: f32,
     pub per_core: Vec<f32>,
     pub freq_mhz: Option<f32>,
+    /// Current speed of each logical CPU (MHz), indexed by CPU number; 0 = unknown/offline.
+    pub per_core_freq: Vec<f32>,
     pub temp_c: Option<f32>,
+    /// CPU package power from RAPL (direct, or through the root helper).
+    pub power_w: Option<f32>,
+    /// The CPU has RAPL energy counters (they may still be unreadable without the helper).
+    pub has_rapl: bool,
     pub ctxt_rate: f64,
     pub hist: History,
     pub core_hist: Vec<History>,
@@ -151,6 +157,9 @@ pub struct Snapshot {
     pub nets: Vec<NetInfo>,
     pub gpus: Vec<GpuInfo>,
     pub batteries: Vec<crate::power::Battery>,
+    pub sensors: Vec<crate::sensors::Sensor>,
+    /// Pressure stall information (None on kernels without PSI).
+    pub pressure: Option<crate::sensors::Pressure>,
     /// Version of the privileged helper if one is answering (per-app network, all disk I/O).
     pub helper: Option<String>,
     pub load: [f32; 3],
@@ -206,7 +215,9 @@ pub struct Sampler {
     last: Instant,
     page_size: u64,
     clk_tck: f64,
-    freq_files: Vec<CachedFile>,
+    /// (CPU number, scaling_cur_freq).
+    freq_files: Vec<(usize, CachedFile)>,
+    sensors: crate::sensors::SensorReader,
     temp_file: Option<CachedFile>,
     sys: SysFiles,
     gpu: GpuReader,
@@ -237,6 +248,7 @@ impl Sampler {
             page_size,
             clk_tck,
             freq_files: Vec::new(),
+            sensors: crate::sensors::SensorReader::new(),
             temp_file: find_cpu_temp().map(|p| CachedFile::new(p, true)),
             sys: SysFiles {
                 stat: CachedFile::new("/proc/stat", false),
@@ -299,7 +311,7 @@ impl Sampler {
         for i in 0..1024 {
             let p = format!("/sys/devices/system/cpu/cpu{i}/cpufreq/scaling_cur_freq");
             if std::path::Path::new(&p).exists() {
-                self.freq_files.push(CachedFile::new(p, true));
+                self.freq_files.push((i, CachedFile::new(p, true)));
             } else if i >= logical {
                 break;
             }
@@ -370,6 +382,7 @@ impl Sampler {
         if self.generation % 30 == 0 {
             self.rescan_devices();
             self.power.rescan();
+            self.sensors.rescan();
         }
 
         let total_delta = self.sample_cpu(elapsed);
@@ -381,6 +394,11 @@ impl Sampler {
         self.snap.batteries = self.power.read();
         self.helper_data = self.helper.fetch();
         self.snap.helper = self.helper_data.as_ref().map(|h| h.version.clone());
+        let rapl = self.helper_data.as_ref().map(|h| &h.rapl);
+        self.snap.cpu.power_w = self.sensors.read(&mut self.buf, elapsed, rapl);
+        self.snap.cpu.has_rapl = self.sensors.has_rapl();
+        self.snap.sensors = self.sensors.sensors().to_vec();
+        self.snap.pressure = self.sensors.pressure.clone();
         let procs = self.sample_procs(elapsed, total_delta);
 
         let mut out = self.snap.clone();
@@ -470,10 +488,16 @@ impl Sampler {
 
         if !self.freq_files.is_empty() {
             let (mut sum, mut n) = (0u64, 0u64);
-            for f in &mut self.freq_files {
+            let per = &mut self.snap.cpu.per_core_freq;
+            per.iter_mut().for_each(|f| *f = 0.0);
+            for (cpu, f) in &mut self.freq_files {
                 if let Some(khz) = f.read_u64(&mut self.buf) {
                     sum += khz;
                     n += 1;
+                    if per.len() <= *cpu {
+                        per.resize(*cpu + 1, 0.0);
+                    }
+                    per[*cpu] = khz as f32 / 1000.0;
                 }
             }
             self.snap.cpu.freq_mhz = (n > 0).then(|| sum as f32 / n as f32 / 1000.0);

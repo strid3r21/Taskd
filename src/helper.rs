@@ -297,7 +297,8 @@ fn snapshot_json(counters: &Mutex<Counters>) -> Value {
             }
         }
     }
-    json!({"v": PROTOCOL, "version": env!("CARGO_PKG_VERSION"), "net": net, "io": io})
+    let rapl = crate::sensors::rapl_snapshot();
+    json!({"v": PROTOCOL, "version": env!("CARGO_PKG_VERSION"), "net": net, "io": io, "rapl": rapl})
 }
 
 /// `taskdm --helper` (as root, normally via systemd).
@@ -368,6 +369,8 @@ fn serve(stream: UnixStream, counters: &Mutex<Counters>) {
 pub struct HelperData {
     pub net: HashMap<u32, (u64, u64)>,
     pub io: HashMap<u32, (u64, u64)>,
+    /// RAPL energy counters (µJ) by domain name; empty from older helpers.
+    pub rapl: HashMap<String, u64>,
     pub version: String,
 }
 
@@ -409,7 +412,18 @@ impl Client {
                     .filter_map(|(p, a)| Some((p.parse().ok()?, (a[0].as_u64()?, a[1].as_u64()?))))
                     .collect()
             };
-            Some(HelperData { net: pairs("net"), io: pairs("io"), version: v["version"].as_str().unwrap_or("").into() })
+            let rapl = v["rapl"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter_map(|(k, x)| Some((k.clone(), x.as_u64()?)))
+                .collect();
+            Some(HelperData {
+                net: pairs("net"),
+                io: pairs("io"),
+                rapl,
+                version: v["version"].as_str().unwrap_or("").into(),
+            })
         })();
         if res.is_none() {
             self.conn = None; // reconnect next time (rate-limited)
